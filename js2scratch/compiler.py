@@ -92,6 +92,7 @@ from js2scratch.builtins import (
     RESERVED_BUILTINS,
 )
 from js2scratch.errors import CompileError
+from js2scratch.optimize import optimize
 from js2scratch.parser import parse
 
 NUMBER = "number"
@@ -132,6 +133,8 @@ class FuncInfo:
     node: FunctionDecl
     custom: CustomBlock | None = None
     locals: dict[str, NameInfo] = field(default_factory=dict)
+    result_used: bool = False
+    returns_value: bool = False
 
 
 class Compiler:
@@ -159,8 +162,10 @@ class Compiler:
         self.return_is_tail = False
 
     def compile(self, program: Program) -> None:
+        program = optimize(program)
         self._collect(program)
-        if self.functions:
+        self._mark_result_uses(program)
+        if any(fn.returns_value or fn.result_used for fn in self.functions.values()):
             self._ensure_return()
         for info in (*self.globals.values(), *(loc for fn in self.functions.values() for loc in fn.locals.values())):
             self._materialize(info)
@@ -309,6 +314,8 @@ class Compiler:
             self._walk_stmt(node.body, func)
             return
         if isinstance(node, Return):
+            if func is not None and node.argument is not None:
+                self.functions[func].returns_value = True
             self._walk_expr(node.argument, func)
             return
         if isinstance(node, Switch):
@@ -366,6 +373,79 @@ class Compiler:
             self._walk_expr(node.object, func)
             self._walk_expr(node.index, func)
             return
+
+    def _mark_result_uses(self, program: Program) -> None:
+        for stmt in program.body:
+            if isinstance(stmt, FunctionDecl):
+                self._mark_uses_stmts(stmt.body)
+            else:
+                self._mark_uses_stmt(stmt)
+
+    def _mark_uses_stmts(self, stmts: list[Node]) -> None:
+        for stmt in stmts:
+            self._mark_uses_stmt(stmt)
+
+    def _mark_uses_stmt(self, node: Node | None) -> None:
+        if node is None:
+            return
+        if isinstance(node, AstBlock):
+            self._mark_uses_stmts(node.body)
+        elif isinstance(node, VarDecl):
+            self._mark_uses_expr(node.init, True)
+        elif isinstance(node, IfNode):
+            self._mark_uses_expr(node.test, True)
+            self._mark_uses_stmt(node.consequent)
+            self._mark_uses_stmt(node.alternate)
+        elif isinstance(node, (While, DoWhile)):
+            self._mark_uses_expr(node.test, True)
+            self._mark_uses_stmt(node.body)
+        elif isinstance(node, For):
+            if isinstance(node.init, VarDecl):
+                self._mark_uses_stmt(node.init)
+            else:
+                self._mark_uses_expr(node.init, False)
+            self._mark_uses_expr(node.test, True)
+            self._mark_uses_expr(node.update, False)
+            self._mark_uses_stmt(node.body)
+        elif isinstance(node, Return):
+            self._mark_uses_expr(node.argument, True)
+        elif isinstance(node, Switch):
+            self._mark_uses_expr(node.discriminant, True)
+            for case in node.cases:
+                self._mark_uses_expr(case.test, True)
+                self._mark_uses_stmts(case.body)
+        elif isinstance(node, ExpressionStmt):
+            self._mark_uses_expr(node.expression, False)
+
+    def _mark_uses_expr(self, node: Node | None, used: bool) -> None:
+        if node is None:
+            return
+        if isinstance(node, Call):
+            if used and isinstance(node.callee, Identifier):
+                fn = self.functions.get(node.callee.name)
+                if fn is not None:
+                    fn.result_used = True
+            self._mark_uses_expr(node.callee, True)
+            for arg in node.arguments:
+                self._mark_uses_expr(arg, True)
+            return
+        if isinstance(node, ArrayLiteral):
+            for el in node.elements:
+                self._mark_uses_expr(el, True)
+            return
+        if isinstance(node, (Binary, Assign)):
+            self._mark_uses_expr(node.left, True)
+            self._mark_uses_expr(node.right, True)
+            return
+        if isinstance(node, (Unary, Update)):
+            self._mark_uses_expr(node.argument, True)
+            return
+        if isinstance(node, Member):
+            self._mark_uses_expr(node.object, True)
+            return
+        if isinstance(node, Index):
+            self._mark_uses_expr(node.object, True)
+            self._mark_uses_expr(node.index, True)
 
     def _literal_type(self, node: Node | None) -> str:
         if isinstance(node, Literal):
@@ -513,7 +593,7 @@ class Compiler:
         self.arr_i += 1
         return self.target.list(f"__arr{self.arr_i}", [])
 
-    def _as_boolean(self, value: Any) -> Any:
+    def _as_boolean(self, value: Any, typ: str = UNKNOWN) -> Any:
         if isinstance(value, BooleanBlock):
             return value
         if isinstance(value, bool):
@@ -522,6 +602,8 @@ class Compiler:
             return Equals(1, 1) if value != 0 else Equals(1, 0)
         if isinstance(value, str):
             return Equals(1, 0) if value == "" else Equals(1, 1)
+        if typ in (NUMBER, BOOLEAN):
+            return Not(Equals(value, 0))
         return Not(Or(Equals(value, 0), Equals(value, "")))
 
     def _numeric_const(self, lowered: Lowered) -> int | float | None:
@@ -565,13 +647,12 @@ class Compiler:
         if kind == "AND":
             body = [SetVariable(ret, and_expr(a, b, bits, self._ensure_and_lut()))]
         else:
-            and_custom, and_ret = self._ensure_bw("AND", bits)
-            and_result = and_ret
+            and_result = and_expr(a, b, bits, self._ensure_and_lut())
             if kind == "OR":
                 result = Subtract(Add(a, b), and_result)
             else:
                 result = Subtract(Add(a, b), Multiply(2, and_result))
-            body = [and_custom(a, b), SetVariable(ret, result)]
+            body = [SetVariable(ret, result)]
         self.target.add_script(Define(custom, *body))
         self.bw_ops[key] = (custom, ret)
         return custom, ret
@@ -696,7 +777,8 @@ class Compiler:
         # crash on load (`nextConnection` is null).
         last_is_return = bool(fn.node.body) and isinstance(fn.node.body[-1], Return)
         if not last_is_return and (not body or not self._is_cap_stop(body[-1])):
-            body.append(SetVariable(self._ensure_return(), ""))
+            if fn.returns_value or fn.result_used:
+                body.append(SetVariable(self._ensure_return(), ""))
         self.target.add_script(Define(fn.custom, *body))
         self.func_name = prev
 
@@ -829,7 +911,7 @@ class Compiler:
                     return [], And(left_cond, right_cond)
                 return [], Or(left_cond, right_cond)
         lowered = self._expr(node)
-        return lowered.blocks, self._as_boolean(lowered.value)
+        return lowered.blocks, self._as_boolean(lowered.value, lowered.type)
 
     def _is_always_true(self, node: Node) -> bool:
         return isinstance(node, Literal) and node.kind == "boolean" and node.value is True
@@ -880,14 +962,30 @@ class Compiler:
 
     def _do_while(self, node: DoWhile) -> list[Any]:
         assert node.test is not None
+        if self._is_always_true(node.test):
+            self.loop_depth += 1
+            try:
+                body = self._stmt(node.body)
+            finally:
+                self.loop_depth -= 1
+            return [Forever(*body)]
+        prelude, cond = self._condition(node.test)
+        if not prelude:
+            old_pinned = self.temp_pinned
+            self.temp_pinned = max(self.temp_pinned, self.temp_i)
+            self.loop_depth += 1
+            try:
+                first = self._stmt(node.body)
+                again = self._stmt(node.body)
+            finally:
+                self.loop_depth -= 1
+                self.temp_pinned = old_pinned
+            return [*first, RepeatUntil(Not(cond), *again)]
         self.loop_depth += 1
         try:
             body = self._stmt(node.body)
         finally:
             self.loop_depth -= 1
-        if self._is_always_true(node.test):
-            return [Forever(*body)]
-        prelude, cond = self._condition(node.test)
         flag = self._new_loop_flag()
         return [
             SetVariable(flag, 1),
@@ -966,7 +1064,78 @@ class Compiler:
             self.sw_ret = self.target.variable("__sw_ret", 0)
         return self.sw_ret
 
+    def _case_terminates(self, body: list[Node]) -> bool:
+        stmts = body
+        while stmts:
+            last = stmts[-1]
+            if isinstance(last, (Break, Return)):
+                return True
+            if isinstance(last, AstBlock):
+                stmts = last.body
+                continue
+            return False
+        return False
+
+    def _switch_has_fallthrough(self, node: Switch) -> bool:
+        for i, case in enumerate(node.cases):
+            if i + 1 == len(node.cases):
+                continue
+            if not self._case_terminates(case.body):
+                return True
+        return False
+
+    def _case_body_without_break(self, stmts: list[Node]) -> list[Any]:
+        blocks: list[Any] = []
+        for stmt in stmts:
+            if isinstance(stmt, Break):
+                break
+            if isinstance(stmt, AstBlock):
+                self._extend_stack(blocks, self._case_body_without_break(stmt.body))
+                continue
+            self._extend_stack(blocks, self._stmt(stmt))
+        return blocks
+
     def _switch(self, node: Switch) -> list[Any]:
+        needs_ret = self.func_name is not None and any(
+            self._contains_return(stmt) for case in node.cases for stmt in case.body
+        )
+        if needs_ret or self._switch_has_fallthrough(node):
+            return self._switch_customs(node, needs_ret)
+        return self._switch_ifs(node)
+
+    def _switch_ifs(self, node: Switch) -> list[Any]:
+        assert node.discriminant is not None
+        if isinstance(node.discriminant, Identifier):
+            disc_val = self._expr(node.discriminant).value
+            blocks: list[Any] = []
+        else:
+            self.switch_i += 1
+            disc = self.target.variable(f"__sw{self.switch_i}_disc", 0)
+            lowered = self._expr(node.discriminant)
+            blocks = [*lowered.blocks, SetVariable(disc, lowered.value)]
+            disc_val = disc
+
+        pairs: list[tuple[Any, list[Any]]] = []
+        default_body: list[Any] | None = None
+        for case in node.cases:
+            body = self._case_body_without_break(case.body)
+            if case.test is None:
+                default_body = body
+                continue
+            test = self._expr(case.test)
+            pairs.append((test, body))
+
+        chain = default_body or []
+        for test, body in reversed(pairs):
+            cond = Equals(disc_val, test.value)
+            if chain:
+                chain = [*test.blocks, IfElse(cond, body, chain)]
+            else:
+                chain = [*test.blocks, If(cond, then=body)]
+        blocks.extend(chain)
+        return blocks
+
+    def _switch_customs(self, node: Switch, needs_ret: bool) -> list[Any]:
         assert node.discriminant is not None
         self.switch_i += 1
         n = self.switch_i
@@ -974,9 +1143,6 @@ class Compiler:
         lowered = self._expr(node.discriminant)
         blocks = [*lowered.blocks, SetVariable(disc, lowered.value)]
 
-        needs_ret = self.func_name is not None and any(
-            self._contains_return(stmt) for case in node.cases for stmt in case.body
-        )
         if needs_ret:
             blocks.append(SetVariable(self._ensure_sw_ret(), 0))
 
@@ -1058,7 +1224,7 @@ class Compiler:
         if isinstance(node, Unary):
             return self._unary(node)
         if isinstance(node, Update):
-            return self._update(node)
+            return self._update(node, used=used)
         if isinstance(node, Assign):
             return self._assign(node)
         if isinstance(node, Call):
@@ -1163,12 +1329,12 @@ class Compiler:
         if node.op == "-":
             return Lowered(arg.blocks, Subtract(0, arg.value), NUMBER)
         if node.op == "+":
-            return Lowered(arg.blocks, Add(0, arg.value), NUMBER)
+            return Lowered(arg.blocks, arg.value, NUMBER, bits=arg.bits)
         if node.op == "~":
             return self._bitwise_not(arg)
         raise self._error(f"unsupported unary operator {node.op!r}", node)
 
-    def _update(self, node: Update) -> Lowered:
+    def _update(self, node: Update, used: bool = True) -> Lowered:
         delta = 1 if node.op == "++" else -1
         target = node.argument
         if isinstance(target, Identifier):
@@ -1177,7 +1343,7 @@ class Compiler:
                 raise self._error("cannot increment an array", node)
             var = info.variable
             info.bits = None
-            if node.prefix:
+            if node.prefix or not used:
                 return Lowered([ChangeVariable(var, delta)], var, NUMBER)
             tmp = self._new_temp()
             return Lowered([SetVariable(tmp, var), ChangeVariable(var, delta)], tmp, NUMBER)
@@ -1191,9 +1357,15 @@ class Compiler:
             if node.prefix:
                 nxt = Add(current, delta) if delta == 1 else Subtract(current, 1)
                 blocks.append(ReplaceItemOfList(scratch_index, obj.value, nxt))
+                if not used:
+                    return Lowered(blocks, "", VOID)
                 tmp = self._new_temp()
                 blocks.append(SetVariable(tmp, ItemOfList(scratch_index, obj.value)))
                 return Lowered(blocks, tmp, NUMBER)
+            if not used:
+                nxt = Add(current, delta) if delta == 1 else Subtract(current, 1)
+                blocks.append(ReplaceItemOfList(scratch_index, obj.value, nxt))
+                return Lowered(blocks, "", VOID)
             tmp = self._new_temp()
             blocks.append(SetVariable(tmp, current))
             nxt = Add(tmp, delta) if delta == 1 else Subtract(tmp, 1)
@@ -1209,6 +1381,9 @@ class Compiler:
                 if info.is_list:
                     blocks = self._fill_list(info.lst, node.right)
                     return Lowered(blocks, info.lst, ARRAY)
+                changed = self._change_by_assign(info, node)
+                if changed is not None:
+                    return changed
                 right = self._expr(node.right)
                 info.type = right.type if right.type != UNKNOWN else info.type
                 info.bits = right.bits
@@ -1220,6 +1395,17 @@ class Compiler:
                 )
             if info.is_list:
                 raise self._error("compound assignment to arrays is not supported", node)
+            if node.op in ("+=", "-="):
+                right = self._expr(node.right)
+                constant = self._numeric_const(right)
+                if constant is not None:
+                    delta = constant if node.op == "+=" else -constant
+                    info.bits = None
+                    return Lowered(
+                        [*right.blocks, ChangeVariable(info.variable, delta)],
+                        info.variable,
+                        NUMBER,
+                    )
             right = self._expr(node.right)
             current = Lowered([], info.variable, info.type, bits=info.bits)
             combined = self._compound(node.op, current, right, node)
@@ -1241,6 +1427,30 @@ class Compiler:
             blocks.append(ReplaceItemOfList(self._scratch_index(idx), obj.value, right.value))
             return Lowered(blocks, right.value, right.type)
         raise self._error("invalid assignment target", node)
+
+    def _change_by_assign(self, info: NameInfo, node: Assign) -> Lowered | None:
+        right = node.right
+        if not isinstance(right, Binary) or right.op not in ("+", "-") or info.variable is None:
+            return None
+        same = None
+        other = None
+        if isinstance(right.left, Identifier) and right.left.name == info.js_name:
+            same, other = right.left, right.right
+        elif right.op == "+" and isinstance(right.right, Identifier) and right.right.name == info.js_name:
+            same, other = right.right, right.left
+        if same is None or other is None:
+            return None
+        lowered = self._expr(other)
+        constant = self._numeric_const(lowered)
+        if constant is None:
+            return None
+        delta = constant if right.op == "+" else -constant
+        info.bits = None
+        return Lowered(
+            [*lowered.blocks, ChangeVariable(info.variable, delta)],
+            info.variable,
+            NUMBER,
+        )
 
     def _compound(self, op: str, left: Lowered, right: Lowered, node: Node) -> Lowered:
         bitwise = {"&=": "&", "|=": "|", "^=": "^", "<<=": "<<", ">>=": ">>", ">>>=": ">>>"}
@@ -1279,7 +1489,7 @@ class Compiler:
         scratch_index = self._scratch_index(idx)
         if obj.type == STRING:
             return Lowered(blocks, LetterOf(scratch_index, obj.value), STRING)
-        return Lowered(blocks, ItemOfList(scratch_index, obj.value), UNKNOWN)
+        return Lowered(blocks, ItemOfList(scratch_index, obj.value), UNKNOWN, bits=8)
 
     def _call(self, node: Call, used: bool) -> Lowered:
         callee = node.callee
@@ -1309,7 +1519,9 @@ class Compiler:
         blocks, sequenced = self._seq(*arg_parts)
         values = [part.value for part in sequenced]
         blocks.append(fn.custom(*values))
-        return Lowered(blocks, self._ensure_return(), UNKNOWN)
+        if used:
+            return Lowered(blocks, self._ensure_return(), UNKNOWN)
+        return Lowered(blocks, "", VOID)
 
     def _call_member(self, node: Call, callee: Member, used: bool) -> Lowered:
         if isinstance(callee.object, Identifier) and callee.object.name == "console":

@@ -505,9 +505,10 @@ def test_or8_includes_and8_only() -> None:
     )
     codes = _proccodes(_sprite_blocks(project))
     assert "OR8 %s %s" in codes
-    assert "AND8 %s %s" in codes
+    assert "AND8 %s %s" not in codes
     assert "OR32 %s %s" not in codes
     assert "AND32 %s %s" not in codes
+    assert _list_named(_sprite(project), "andLUT") is not None
 
 
 def test_or_and_xor_helpers_and_dependencies() -> None:
@@ -522,9 +523,10 @@ def test_or_and_xor_helpers_and_dependencies() -> None:
     codes = _proccodes(_sprite_blocks(project))
     assert "OR32 %s %s" in codes
     assert "XOR32 %s %s" in codes
-    assert "AND32 %s %s" in codes
+    assert "AND32 %s %s" not in codes
     assert "AND8 %s %s" not in codes
     assert "OR8 %s %s" not in codes
+    assert _list_named(_sprite(project), "andLUT") is not None
 
 
 def test_constant_shift_is_multiply_or_floor() -> None:
@@ -621,17 +623,9 @@ def test_switch_compiles_case_blocks_and_stops() -> None:
     project = compile_js(source, sprite="Cat")
     blocks = _sprite_blocks(project)
     codes = _proccodes(blocks)
-    assert "__sw1" in codes
-    assert "__sw1_c0" in codes
-    assert "__sw1_c1" in codes
-    assert "__sw1_c2" in codes
-    assert _by_opcode(blocks, "control_if")
-    stops = _by_opcode(blocks, "control_stop")
-    assert stops
-    for _, node in stops:
-        has_next = str((node.get("mutation") or {}).get("hasnext", "false")) == "true"
-        if not has_next:
-            assert node.get("next") is None
+    assert "__sw1" not in codes
+    assert not any(str(code).startswith("__sw1_c") for code in codes)
+    assert _by_opcode(blocks, "control_if") or _by_opcode(blocks, "control_if_else")
     hats = _by_opcode(blocks, "event_whenflagclicked")
     flag_script = _script_ids(blocks, hats[0][1].get("next"))
     says_in_flag = [
@@ -760,7 +754,8 @@ def test_mutated_param_is_copied() -> None:
 def test_make_color_snapshots_only_live_returns() -> None:
     source = """
     function hexByte(n) {
-      return n;
+      let x = n;
+      return x;
     }
     function makeColor(r, g, b) {
       return "#" + hexByte(r) + hexByte(g) + hexByte(b);
@@ -797,7 +792,8 @@ def test_make_color_snapshots_only_live_returns() -> None:
 def test_two_calls_snapshot_the_first() -> None:
     source = """
     function id(x) {
-      return x;
+      let y = x;
+      return y;
     }
     console.log(id(1), id(2));
     """
@@ -861,6 +857,117 @@ def test_condition_not_and_or_are_operators() -> None:
     assert _by_opcode(blocks, "operator_or")
     names = _var_names(_sprite(project))
     assert not any(name.startswith("__t") for name in names)
+
+
+def test_postfix_increment_statement_uses_change_by() -> None:
+    source = """
+    let i = 0;
+    i++;
+    for (let j = 0; j < 3; j++) {
+      i = i + 1;
+    }
+    """
+    project = compile_js(source, sprite="Cat")
+    sprite = _sprite(project)
+    assert _by_opcode(sprite["blocks"], "data_changevariableby")
+    assert not any(name.startswith("__t") for name in _var_names(sprite))
+
+
+def test_void_function_omits_empty_return() -> None:
+    source = """
+    function bar() {
+    }
+    function foo() {
+      bar();
+    }
+    foo();
+    """
+    project = compile_js(source, sprite="Cat")
+    sprite = _sprite(project)
+    assert "__return" not in _var_names(sprite)
+    sets = [
+        node
+        for _, node in _by_opcode(sprite["blocks"], "data_setvariableto")
+        if node["fields"]["VARIABLE"][0] == "__return"
+    ]
+    assert not sets
+
+
+def test_pure_do_while_has_no_loop_flag() -> None:
+    source = """
+    let n = 0;
+    do {
+      n++;
+    } while (n < 3);
+    """
+    project = compile_js(source, sprite="Cat")
+    sprite = _sprite(project)
+    assert _by_opcode(sprite["blocks"], "control_repeat_until")
+    assert not any(name.startswith("__loop") for name in _var_names(sprite))
+
+
+def test_compound_add_uses_change_by() -> None:
+    source = """
+    let x = 0;
+    x += 2;
+    x = x + 3;
+    """
+    project = compile_js(source, sprite="Cat")
+    blocks = _sprite_blocks(project)
+    assert len(_by_opcode(blocks, "data_changevariableby")) >= 2
+    assert not _by_opcode(blocks, "operator_add")
+
+
+def test_number_truthiness_skips_empty_string() -> None:
+    source = """
+    let n = 0;
+    if (n) {
+      n = 1;
+    }
+    """
+    project = compile_js(source, sprite="Cat")
+    blocks = _sprite_blocks(project)
+    equals = _by_opcode(blocks, "operator_equals")
+    assert equals
+    for _, node in equals:
+        inputs = node["inputs"]
+        vals = []
+        for key in ("OPERAND1", "OPERAND2"):
+            raw = inputs.get(key)
+            if raw and isinstance(raw[1], list):
+                vals.append(raw[1][1])
+        assert "" not in vals
+
+
+def test_list_or_uses_or8() -> None:
+    source = """
+    let v = [1, 2];
+    console.log(v[0] | v[1]);
+    """
+    project = compile_js(source, sprite="Cat")
+    codes = _proccodes(_sprite_blocks(project))
+    assert "OR8 %s %s" in codes
+    assert "OR32 %s %s" not in codes
+
+
+def test_const_fold_add() -> None:
+    project = compile_js("console.log(1 + 2);")
+    say = _by_opcode(_sprite_blocks(project), "looks_say")[0][1]
+    assert say["inputs"]["MESSAGE"][1][1] == "3"
+    assert not _by_opcode(_sprite_blocks(project), "operator_add")
+
+
+def test_tiny_function_inlined_when_called_twice() -> None:
+    source = """
+    function dub(x) {
+      return x + x;
+    }
+    console.log(dub(1));
+    console.log(dub(2));
+    """
+    project = compile_js(source, sprite="Cat")
+    codes = _proccodes(_sprite_blocks(project))
+    assert not any(code == "dub %s" or (isinstance(code, str) and code.startswith("dub ")) for code in codes)
 
 
 def test_compile_nes_example() -> None:

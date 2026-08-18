@@ -284,11 +284,12 @@ Explicit compile errors (not a complete list of every JS feature):
 ## How compilation works
 
 1. **Parse** the file into an AST (JS subset).
-2. **Collect** functions vs top-level statements; classify names as variables or lists.
-3. **Lower** expressions to `(prelude stack blocks, reporter)`:
+2. **Optimize** the AST: fold numeric `+ - * / %`, inline tiny leaf functions that are called at least twice, drop unused literal `let`s.
+3. **Collect** functions vs top-level statements; classify names as variables or lists.
+4. **Lower** expressions to `(prelude stack blocks, reporter)`:
    - Pure math stays nested: `Say(Add(1, Multiply(2, 3)))`
    - User calls are stack blocks. The result stays in `__return` unless a later call (or other write) would clobber it, in which case it is copied to `__tN`.
-4. **Emit** `Define` scripts for each function, then `WhenFlagClicked` for top-level code.
+5. **Emit** `Define` scripts for each function, then `WhenFlagClicked` for top-level code.
 
 Scratch has no returning reporters for custom blocks, which is why functions use `__return`.
 
