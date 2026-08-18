@@ -1,0 +1,48 @@
+# Bytecode and caches
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+.hypothesis/
+.cache/
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Packaging / install
+build/
+dist/
+wheels/
+*.egg
+*.egg-info/
+*.whl
+pip-wheel-metadata/
+
+# Generated Scratch projects (compile/save output)
+*.sb3
+*.sb2
+
+# Environment and secrets
+.env
+.env.*
+!.env.example
+
+# Editors and OS
+.idea/
+.vscode/
+*.swp
+*~
+.DS_Store
+Thumbs.db
+Desktop.ini

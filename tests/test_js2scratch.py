@@ -1,0 +1,692 @@
+from __future__ import annotations
+
+import json
+import zipfile
+from pathlib import Path
+
+import pytest
+
+from js2scratch import CompileError, compile_js, compile_project, parse
+from js2scratch.ast import (
+    Binary,
+    Break,
+    Call,
+    ExpressionStmt,
+    Identifier,
+    Literal,
+    Member,
+    Program,
+    Switch,
+    SwitchCase,
+)
+
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+def _by_opcode(blocks: dict, opcode: str) -> list[tuple[str, dict]]:
+    return [
+        (block_id, block)
+        for block_id, block in blocks.items()
+        if isinstance(block, dict) and block.get("opcode") == opcode
+    ]
+
+
+def _sprite(project) -> dict:
+    data = project.to_dict()
+    return next(target for target in data["targets"] if not target["isStage"])
+
+
+def _sprite_blocks(project) -> dict:
+    return _sprite(project)["blocks"]
+
+
+def _proccodes(blocks: dict) -> list[str]:
+    return [
+        (block.get("mutation") or {}).get("proccode")
+        for _, block in _by_opcode(blocks, "procedures_prototype")
+        if (block.get("mutation") or {}).get("proccode")
+    ]
+
+
+def _list_named(sprite: dict, name: str):
+    for entry in sprite["lists"].values():
+        if entry[0] == name:
+            return entry[1]
+    return None
+
+
+def _var_names(sprite: dict) -> list[str]:
+    return [entry[0] for entry in sprite["variables"].values()]
+
+
+def _script_ids(blocks: dict, start_id: str | None) -> list[str]:
+    ids: list[str] = []
+    current = start_id
+    while current:
+        ids.append(current)
+        current = blocks[current].get("next")
+    return ids
+
+
+def _definition_body_ids(blocks: dict, proccode: str) -> list[str]:
+    for proto_id, proto in _by_opcode(blocks, "procedures_prototype"):
+        if (proto.get("mutation") or {}).get("proccode") != proccode:
+            continue
+        definition = blocks[proto["parent"]]
+        return _script_ids(blocks, definition.get("next"))
+    raise AssertionError(f"no definition for {proccode!r}")
+
+
+def test_parse_hello_world() -> None:
+    program = parse('console.log("Hello World!");')
+    assert isinstance(program, Program)
+    stmt = program.body[0]
+    assert isinstance(stmt, ExpressionStmt)
+    assert isinstance(stmt.expression, Call)
+    assert isinstance(stmt.expression.callee, Member)
+    assert isinstance(stmt.expression.arguments[0], Literal)
+    assert stmt.expression.arguments[0].value == "Hello World!"
+
+
+def test_parse_rejects_objects() -> None:
+    with pytest.raises(CompileError, match="object literals are not supported"):
+        parse("let x = { a: 1 };")
+
+
+def test_parse_rejects_new() -> None:
+    with pytest.raises(CompileError, match="new / objects are not supported"):
+        parse("let x = new Foo();")
+
+
+def test_parse_rejects_this() -> None:
+    with pytest.raises(CompileError, match="this is not supported"):
+        parse("console.log(this);")
+
+
+def test_hello_world_opcodes() -> None:
+    project = compile_js('console.log("Hello World!");', sprite="Cat", name="Hello World")
+    blocks = _sprite_blocks(project)
+    hats = _by_opcode(blocks, "event_whenflagclicked")
+    says = _by_opcode(blocks, "looks_say")
+    assert len(hats) == 1
+    assert len(says) == 1
+    message = says[0][1]["inputs"]["MESSAGE"]
+    assert message[0] == 1
+    assert message[1][0] == 10
+    assert message[1][1] == "Hello World!"
+    assert hats[0][1]["next"] == says[0][0]
+
+
+def test_function_return_convention() -> None:
+    source = """
+    function add(a, b) {
+      return a + b;
+    }
+    console.log(add(1, 2));
+    """
+    project = compile_js(source, sprite="Cat")
+    blocks = _sprite_blocks(project)
+    defs = _by_opcode(blocks, "procedures_definition")
+    calls = _by_opcode(blocks, "procedures_call")
+    adds = _by_opcode(blocks, "operator_add")
+    asserts_sets = _by_opcode(blocks, "data_setvariableto")
+    says = _by_opcode(blocks, "looks_say")
+    assert defs
+    assert calls
+    assert adds
+    assert says
+    return_sets = [
+        node
+        for _, node in asserts_sets
+        if node["fields"]["VARIABLE"][0] == "__return"
+    ]
+    assert return_sets
+    copied = [
+        node
+        for _, node in asserts_sets
+        if node["fields"]["VARIABLE"][0].startswith("__t")
+    ]
+    assert copied
+
+
+def test_return_does_not_attach_blocks_after_stop() -> None:
+    source = """
+    function add(a, b) {
+      return a + b;
+    }
+    console.log(add(1, 2));
+    """
+    project = compile_js(source, sprite="Cat")
+    blocks = _sprite_blocks(project)
+    stops = _by_opcode(blocks, "control_stop")
+    assert stops
+    for _, node in stops:
+        has_next = str((node.get("mutation") or {}).get("hasnext", "false")) == "true"
+        if not has_next:
+            assert node.get("next") is None
+
+
+def test_constant_array_stored_on_list() -> None:
+    source = """
+    let a = [10, 20];
+    console.log(a[0]);
+    """
+    project = compile_js(source, sprite="Cat")
+    data = project.to_dict()
+    sprite = next(target for target in data["targets"] if target["name"] == "Cat")
+    values = [entry[1] for entry in sprite["lists"].values()]
+    assert any(item == [10, 20] for item in values)
+
+
+def test_if_while_and_math() -> None:
+    source = """
+    let n = 0;
+    if (1 + 2 > 2) {
+      n = Math.abs(-3);
+    }
+    while (n < 5) {
+      n = n + 1;
+    }
+    console.log(n);
+    """
+    project = compile_js(source)
+    blocks = _sprite_blocks(project)
+    assert _by_opcode(blocks, "control_if")
+    assert _by_opcode(blocks, "control_repeat_until")
+    assert _by_opcode(blocks, "operator_mathop")
+    assert _by_opcode(blocks, "looks_say")
+
+
+def test_arrays_are_1_based() -> None:
+    source = """
+    let a = [10, 20];
+    console.log(a[0]);
+    a.push(30);
+    """
+    project = compile_js(source)
+    blocks = _sprite_blocks(project)
+    assert _by_opcode(blocks, "data_itemoflist")
+    assert _by_opcode(blocks, "data_addtolist")
+    adds = _by_opcode(blocks, "operator_add")
+    assert any(
+        node["inputs"]["NUM2"][1][1] == "1"
+        for _, node in adds
+    )
+
+
+def test_for_loop_and_string_join() -> None:
+    source = """
+    let s = "";
+    for (let i = 0; i < 3; i++) {
+      s = s + "a";
+    }
+    console.log(s);
+    """
+    project = compile_js(source)
+    blocks = _sprite_blocks(project)
+    assert _by_opcode(blocks, "control_repeat_until")
+    assert _by_opcode(blocks, "operator_join")
+    assert _by_opcode(blocks, "looks_say")
+
+
+def test_unknown_property_is_rejected() -> None:
+    with pytest.raises(CompileError, match="property access is not supported"):
+        compile_js("let x = 1; console.log(x.foo);")
+
+
+def test_compile_error_includes_location() -> None:
+    with pytest.raises(CompileError, match="object literals") as excinfo:
+        parse("let x = {};", filename="Cat.js")
+    err = excinfo.value
+    assert err.filename == "Cat.js"
+    assert err.line == 1
+    assert err.column is not None
+
+
+def test_compile_project_folder() -> None:
+    folder = ROOT / "examples" / "js" / "hello_world"
+    project = compile_project(folder)
+    assert project.name == "Hello World"
+    data = project.to_dict()
+    names = [target["name"] for target in data["targets"]]
+    assert names[0] == "Stage"
+    assert "Cat" in names
+    blocks = _sprite_blocks(project)
+    assert _by_opcode(blocks, "looks_say")
+
+
+def test_compile_project_writes_sb3(tmp_path: Path) -> None:
+    project = compile_project(ROOT / "examples" / "js" / "functions")
+    path = tmp_path / "functions.sb3"
+    project.save(path)
+    with zipfile.ZipFile(path) as archive:
+        data = json.loads(archive.read("project.json"))
+    sprite = next(target for target in data["targets"] if target["name"] == "Cat")
+    opcodes = {
+        block["opcode"]
+        for block in sprite["blocks"].values()
+        if isinstance(block, dict) and "opcode" in block
+    }
+    assert "procedures_definition" in opcodes
+    assert "procedures_call" in opcodes
+    assert "looks_say" in opcodes
+
+
+def test_pen_and_motion_builtins() -> None:
+    source = """
+    pen.clear();
+    pen.setColor("#4C97FF");
+    pen.setSize(3);
+    pen.down();
+    move(10);
+    turnRight(10);
+    pen.up();
+    """
+    project = compile_js(source, sprite="Cat")
+    blocks = _sprite_blocks(project)
+    assert _by_opcode(blocks, "pen_clear")
+    assert _by_opcode(blocks, "pen_setPenColorToColor")
+    assert _by_opcode(blocks, "pen_setPenSizeTo")
+    assert _by_opcode(blocks, "pen_penDown")
+    assert _by_opcode(blocks, "pen_penUp")
+    assert _by_opcode(blocks, "motion_movesteps")
+    assert _by_opcode(blocks, "motion_turnright")
+    data = project.to_dict()
+    assert "pen" in data["extensions"]
+
+
+def test_pen_unknown_method_rejected() -> None:
+    with pytest.raises(CompileError, match="pen.foo is not supported"):
+        compile_js("pen.foo();")
+
+
+def test_compile_pen_example() -> None:
+    project = compile_project(ROOT / "examples" / "js" / "pen")
+    blocks = _sprite_blocks(project)
+    assert _by_opcode(blocks, "pen_penDown")
+    assert _by_opcode(blocks, "control_repeat_until")
+    assert _by_opcode(blocks, "motion_movesteps")
+
+
+def test_global_array_used_in_function() -> None:
+    source = """
+    let mem = [];
+    function poke(i, value) {
+      mem[i] = value;
+    }
+    mem.push(0);
+    poke(0, 7);
+    console.log(mem[0]);
+    """
+    project = compile_js(source, sprite="Cat")
+    blocks = _sprite_blocks(project)
+    assert _by_opcode(blocks, "data_replaceitemoflist")
+    assert _by_opcode(blocks, "procedures_definition")
+
+
+def test_key_pressed_builtin() -> None:
+    source = """
+    let n = 0;
+    if (keyPressed("space")) {
+      n = 1;
+    }
+    """
+    project = compile_js(source, sprite="Cat")
+    blocks = _sprite_blocks(project)
+    assert _by_opcode(blocks, "sensing_keypressed")
+
+
+def test_load_list_from_file(tmp_path: Path) -> None:
+    (tmp_path / "words.txt").write_text("alpha\n42\n3.5\n", encoding="utf-8")
+    (tmp_path / "Cat.js").write_text(
+        'let words = loadList("words.txt");\nconsole.log(words[0]);\n',
+        encoding="utf-8",
+    )
+    project = compile_project(tmp_path)
+    data = project.to_dict()
+    sprite = next(target for target in data["targets"] if target["name"] == "Cat")
+    values = [entry[1] for entry in sprite["lists"].values()]
+    assert any(item == ["alpha", 42, 3.5] for item in values)
+    blocks = sprite["blocks"]
+    assert not _by_opcode(blocks, "data_addtolist")
+    assert _by_opcode(blocks, "data_itemoflist")
+
+
+def test_load_list_nested_path(tmp_path: Path) -> None:
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    (data_dir / "rom.txt").write_text("240\n144\n", encoding="utf-8")
+    source = 'let rom = loadList("data/rom.txt");\nconsole.log(rom.length);\n'
+    project = compile_js(source, sprite="Cat", filename=str(tmp_path / "Cat.js"))
+    data = project.to_dict()
+    sprite = next(target for target in data["targets"] if target["name"] == "Cat")
+    values = [entry[1] for entry in sprite["lists"].values()]
+    assert any(item == [240, 144] for item in values)
+
+
+def test_load_list_rejects_non_literal() -> None:
+    with pytest.raises(CompileError, match="string literal"):
+        compile_js('let p = "a.txt"; let a = loadList(p);')
+
+
+def test_load_list_missing_file(tmp_path: Path) -> None:
+    with pytest.raises(CompileError, match="cannot read list file"):
+        compile_js(
+            'let a = loadList("missing.txt");',
+            filename=str(tmp_path / "Cat.js"),
+        )
+
+
+def test_bitwise_constant_fold_has_no_helpers() -> None:
+    project = compile_js("console.log(12 & 10);")
+    sprite = _sprite(project)
+    assert _list_named(sprite, "andLUT") is None
+    assert not any(code.startswith("AND") for code in _proccodes(sprite["blocks"]))
+    say = _by_opcode(sprite["blocks"], "looks_say")[0][1]
+    assert say["inputs"]["MESSAGE"][1][1] == "8"
+
+
+def test_and_all_ones_mask_uses_modulo() -> None:
+    project = compile_js(
+        """
+        let x = 0;
+        console.log(x & 255);
+        """
+    )
+    sprite = _sprite(project)
+    assert _by_opcode(sprite["blocks"], "operator_mod")
+    assert _list_named(sprite, "andLUT") is None
+    assert not any(code.startswith("AND") for code in _proccodes(sprite["blocks"]))
+
+
+def test_and8_helper_not_and32() -> None:
+    project = compile_js(
+        """
+        let a = 1;
+        let b = 2;
+        console.log(a & b);
+        """
+    )
+    sprite = _sprite(project)
+    codes = _proccodes(sprite["blocks"])
+    assert "AND8 %s %s" in codes
+    assert "AND16 %s %s" not in codes
+    assert "AND32 %s %s" not in codes
+    lut = _list_named(sprite, "andLUT")
+    assert lut is not None
+    assert len(lut) == 65536
+    assert lut[0] == 0
+    assert lut[1 * 256 + 1] == 1
+    assert lut[12 * 256 + 10] == 8
+
+
+def test_and16_helper_not_and32() -> None:
+    project = compile_js(
+        """
+        let a = 1000;
+        let b = 2000;
+        console.log(a & b);
+        """
+    )
+    codes = _proccodes(_sprite_blocks(project))
+    assert "AND16 %s %s" in codes
+    assert "AND8 %s %s" not in codes
+    assert "AND32 %s %s" not in codes
+
+
+def test_unknown_and_uses_and32() -> None:
+    project = compile_js(
+        """
+        function band(a, b) {
+          return a & b;
+        }
+        console.log(band(12, 10));
+        """
+    )
+    codes = _proccodes(_sprite_blocks(project))
+    assert "AND32 %s %s" in codes
+    assert "AND8 %s %s" not in codes
+    assert "OR32 %s %s" not in codes
+
+
+def test_or8_includes_and8_only() -> None:
+    project = compile_js(
+        """
+        let a = 1;
+        let b = 2;
+        console.log(a | b);
+        """
+    )
+    codes = _proccodes(_sprite_blocks(project))
+    assert "OR8 %s %s" in codes
+    assert "AND8 %s %s" in codes
+    assert "OR32 %s %s" not in codes
+    assert "AND32 %s %s" not in codes
+
+
+def test_or_and_xor_helpers_and_dependencies() -> None:
+    project = compile_js(
+        """
+        function mix(a, b) {
+          return (a | b) ^ a;
+        }
+        console.log(mix(1, 2));
+        """
+    )
+    codes = _proccodes(_sprite_blocks(project))
+    assert "OR32 %s %s" in codes
+    assert "XOR32 %s %s" in codes
+    assert "AND32 %s %s" in codes
+    assert "AND8 %s %s" not in codes
+    assert "OR8 %s %s" not in codes
+
+
+def test_constant_shift_is_multiply_or_floor() -> None:
+    project = compile_js(
+        """
+        let x = 1;
+        console.log(x << 3);
+        console.log(x >> 1);
+        """
+    )
+    sprite = _sprite(project)
+    assert _list_named(sprite, "pow2LUT") is None
+    assert _by_opcode(sprite["blocks"], "operator_multiply")
+    assert _by_opcode(sprite["blocks"], "operator_mathop")
+
+
+def test_variable_shift_uses_pow2_lut() -> None:
+    project = compile_js(
+        """
+        function shl(a, n) {
+          return a << n;
+        }
+        console.log(shl(1, 3));
+        """
+    )
+    sprite = _sprite(project)
+    lut = _list_named(sprite, "pow2LUT")
+    assert lut == [1 << n for n in range(32)]
+    assert _list_named(sprite, "andLUT") is None
+
+
+def test_bitwise_not_and_compound_and() -> None:
+    project = compile_js(
+        """
+        let x = 7;
+        x &= 3;
+        console.log(~x);
+        """
+    )
+    sprite = _sprite(project)
+    assert _by_opcode(sprite["blocks"], "operator_mod")
+    assert _by_opcode(sprite["blocks"], "operator_subtract")
+    assert _list_named(sprite, "andLUT") is None
+
+
+def test_parse_bitwise_precedence() -> None:
+    program = parse("1 + 2 & 3 << 2")
+    expr = program.body[0].expression
+    assert isinstance(expr, Binary)
+    assert expr.op == "&"
+    assert isinstance(expr.left, Binary) and expr.left.op == "+"
+    assert isinstance(expr.right, Binary) and expr.right.op == "<<"
+
+
+def test_parse_switch() -> None:
+    program = parse(
+        """
+        switch (x) {
+          case 1:
+            break;
+          default:
+            x = 2;
+        }
+        """
+    )
+    stmt = program.body[0]
+    assert isinstance(stmt, Switch)
+    assert isinstance(stmt.discriminant, Identifier)
+    assert stmt.discriminant.name == "x"
+    assert len(stmt.cases) == 2
+    first, second = stmt.cases
+    assert isinstance(first, SwitchCase)
+    assert isinstance(first.test, Literal) and first.test.value == 1
+    assert isinstance(first.body[0], Break)
+    assert second.test is None
+    assert second.body
+
+
+def test_switch_compiles_case_blocks_and_stops() -> None:
+    source = """
+    let x = 1;
+    switch (x) {
+      case 1:
+        console.log("one");
+        break;
+      case 2:
+        console.log("two");
+        break;
+      default:
+        console.log("other");
+    }
+    console.log("after");
+    """
+    project = compile_js(source, sprite="Cat")
+    blocks = _sprite_blocks(project)
+    codes = _proccodes(blocks)
+    assert "__sw1" in codes
+    assert "__sw1_c0" in codes
+    assert "__sw1_c1" in codes
+    assert "__sw1_c2" in codes
+    assert _by_opcode(blocks, "control_if")
+    stops = _by_opcode(blocks, "control_stop")
+    assert stops
+    for _, node in stops:
+        has_next = str((node.get("mutation") or {}).get("hasnext", "false")) == "true"
+        if not has_next:
+            assert node.get("next") is None
+    hats = _by_opcode(blocks, "event_whenflagclicked")
+    flag_script = _script_ids(blocks, hats[0][1].get("next"))
+    says_in_flag = [
+        bid for bid in flag_script if blocks[bid].get("opcode") == "looks_say"
+    ]
+    assert len(says_in_flag) == 1
+
+
+def test_switch_fallthrough_calls_next_case() -> None:
+    source = """
+    let x = 1;
+    switch (x) {
+      case 1:
+        console.log("one");
+      case 2:
+        console.log("two");
+        break;
+      default:
+        console.log("other");
+    }
+    """
+    project = compile_js(source, sprite="Cat")
+    blocks = _sprite_blocks(project)
+    body = _definition_body_ids(blocks, "__sw1_c0")
+    calls = [
+        blocks[bid]
+        for bid in body
+        if blocks[bid].get("opcode") == "procedures_call"
+    ]
+    assert any((node.get("mutation") or {}).get("proccode") == "__sw1_c1" for node in calls)
+    broken = _definition_body_ids(blocks, "__sw1_c1")
+    broken_calls = [
+        (blocks[bid].get("mutation") or {}).get("proccode")
+        for bid in broken
+        if blocks[bid].get("opcode") == "procedures_call"
+    ]
+    assert "__sw1_c2" not in broken_calls
+
+
+def test_return_in_case_sets_flag() -> None:
+    source = """
+    function pick(x) {
+      switch (x) {
+        case 1:
+          return 2;
+        default:
+          return 3;
+      }
+    }
+    console.log(pick(1));
+    """
+    project = compile_js(source, sprite="Cat")
+    sprite = _sprite(project)
+    assert "__sw_ret" in _var_names(sprite)
+    sets = [
+        node
+        for _, node in _by_opcode(sprite["blocks"], "data_setvariableto")
+        if node["fields"]["VARIABLE"][0] == "__sw_ret"
+    ]
+    assert any(node["inputs"]["VALUE"][1][1] == "1" for node in sets)
+    assert any(node["inputs"]["VALUE"][1][1] == "0" for node in sets)
+
+
+def test_switch_without_return_has_no_flag() -> None:
+    source = """
+    function pick(x) {
+      switch (x) {
+        case 1:
+          break;
+      }
+      return 0;
+    }
+    console.log(pick(1));
+    """
+    project = compile_js(source, sprite="Cat")
+    sprite = _sprite(project)
+    assert "__sw_ret" not in _var_names(sprite)
+
+
+def test_break_outside_switch_is_rejected() -> None:
+    with pytest.raises(CompileError, match="break outside of switch"):
+        compile_js("break;")
+
+
+def test_break_in_loop_is_rejected() -> None:
+    with pytest.raises(CompileError, match="break in loops is not supported"):
+        compile_js("while (true) { break; }")
+
+
+def test_continue_still_rejected() -> None:
+    with pytest.raises(CompileError, match="continue is not supported"):
+        parse("while (true) { continue; }")
+
+
+def test_multiple_default_is_rejected() -> None:
+    with pytest.raises(CompileError, match="multiple default clauses"):
+        parse("switch (1) { default: break; default: break; }")
+
+
+def test_case_outside_switch_is_rejected() -> None:
+    with pytest.raises(CompileError, match="case outside of switch"):
+        parse("case 1: break;")
+
