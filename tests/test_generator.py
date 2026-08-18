@@ -349,3 +349,14 @@ def test_pen_extension_blocks_and_menus() -> None:
 
     size = _by_opcode(blocks, "pen_setPenSizeTo")[0][1]
     assert size["inputs"]["SIZE"] == [1, [4, "5"]]
+
+
+def test_pen_color_accepts_decimal_rgb() -> None:
+    project = Project()
+    cat = project.add_sprite("Cat")
+    cat.add_script(WhenFlagClicked(SetPenColor(16711680), SetPenColor((0, 255, 0))))
+    blocks = project.to_dict()["targets"][1]["blocks"]
+    colors = [node["inputs"]["COLOR"] for _, node in _by_opcode(blocks, "pen_setPenColorToColor")]
+    assert colors[0] == [3, [4, "16711680"], [9, "#9966FF"]]
+    assert colors[1] == [1, [9, "#00ff00"]]
+

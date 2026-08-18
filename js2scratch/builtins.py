@@ -17,6 +17,7 @@ from scratch3.blocks import (
     PenDown,
     PenUp,
     PointInDirection,
+    ResetTimer,
     SetPenColor,
     SetPenParam,
     SetPenSize,
@@ -24,6 +25,7 @@ from scratch3.blocks import (
     SetY,
     Show,
     Stamp,
+    Timer,
     TurnLeft,
     TurnRight,
     Wait,
@@ -87,4 +89,6 @@ DRAW_BUILTINS = {
     "yPosition": (0, lambda: YPosition(), "reporter"),
     "direction": (0, lambda: Direction(), "reporter"),
     "keyPressed": (1, lambda key: KeyPressed(key), "boolean"),
+    "timer": (0, lambda: Timer(), "reporter"),
+    "resetTimer": (0, lambda: ResetTimer(), "stack"),
 }

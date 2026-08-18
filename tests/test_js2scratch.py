@@ -126,7 +126,8 @@ def test_function_return_convention() -> None:
     console.log(add(1, 2));
     """
     project = compile_js(source, sprite="Cat")
-    blocks = _sprite_blocks(project)
+    sprite = _sprite(project)
+    blocks = sprite["blocks"]
     defs = _by_opcode(blocks, "procedures_definition")
     calls = _by_opcode(blocks, "procedures_call")
     adds = _by_opcode(blocks, "operator_add")
@@ -147,15 +148,24 @@ def test_function_return_convention() -> None:
         for _, node in asserts_sets
         if node["fields"]["VARIABLE"][0].startswith("__t")
     ]
-    assert copied
+    assert not copied
+    assert "add__a" not in _var_names(sprite)
+    assert "add__b" not in _var_names(sprite)
+    body = _definition_body_ids(blocks, "add %s %s")
+    assert not any(blocks[bid].get("opcode") == "control_stop" for bid in body)
+    args = _by_opcode(blocks, "argument_reporter_string_number")
+    assert {node["fields"]["VALUE"][0] for _, node in args} >= {"a", "b"}
 
 
 def test_return_does_not_attach_blocks_after_stop() -> None:
     source = """
-    function add(a, b) {
-      return a + b;
+    function pick(x) {
+      if (x) {
+        return 1;
+      }
+      return 2;
     }
-    console.log(add(1, 2));
+    console.log(pick(1));
     """
     project = compile_js(source, sprite="Cat")
     blocks = _sprite_blocks(project)
@@ -206,13 +216,13 @@ def test_arrays_are_1_based() -> None:
     """
     project = compile_js(source)
     blocks = _sprite_blocks(project)
-    assert _by_opcode(blocks, "data_itemoflist")
+    items = _by_opcode(blocks, "data_itemoflist")
+    assert items
     assert _by_opcode(blocks, "data_addtolist")
-    adds = _by_opcode(blocks, "operator_add")
-    assert any(
-        node["inputs"]["NUM2"][1][1] == "1"
-        for _, node in adds
-    )
+    index = items[0][1]["inputs"]["INDEX"]
+    assert index[0] == 1
+    assert index[1][1] == "1"
+    assert not _by_opcode(blocks, "operator_add")
 
 
 def test_for_loop_and_string_join() -> None:
@@ -294,6 +304,25 @@ def test_pen_and_motion_builtins() -> None:
     assert _by_opcode(blocks, "motion_turnright")
     data = project.to_dict()
     assert "pen" in data["extensions"]
+    hex_color = _by_opcode(blocks, "pen_setPenColorToColor")[0][1]
+    assert hex_color["inputs"]["COLOR"] == [1, [9, "#4C97FF"]]
+
+
+def test_pen_set_color_decimal_rgb() -> None:
+    source = """
+    let packed = 16711680;
+    pen.setColor(7259381);
+    pen.setColor(packed);
+    """
+    project = compile_js(source, sprite="Cat")
+    blocks = _sprite_blocks(project)
+    colors = [node["inputs"]["COLOR"] for _, node in _by_opcode(blocks, "pen_setPenColorToColor")]
+    assert colors[0][0] == 3
+    assert colors[0][1] == [4, "7259381"]
+    assert colors[0][2] == [9, "#9966FF"]
+    assert colors[1][0] == 3
+    assert colors[1][1][0] == 12
+    assert colors[1][1][1] == "packed"
 
 
 def test_pen_unknown_method_rejected() -> None:
@@ -335,6 +364,22 @@ def test_key_pressed_builtin() -> None:
     project = compile_js(source, sprite="Cat")
     blocks = _sprite_blocks(project)
     assert _by_opcode(blocks, "sensing_keypressed")
+
+
+def test_timer_and_show_variable() -> None:
+    source = """
+    let fps = 0;
+    resetTimer();
+    showVariable("fps");
+    fps = timer();
+    """
+    project = compile_js(source, sprite="Cat")
+    blocks = _sprite_blocks(project)
+    assert _by_opcode(blocks, "sensing_timer")
+    assert _by_opcode(blocks, "sensing_resettimer")
+    assert _by_opcode(blocks, "data_showvariable")
+    data = project.to_dict()
+    assert any(m.get("params", {}).get("VARIABLE") == "fps" and m.get("visible") for m in data["monitors"])
 
 
 def test_load_list_from_file(tmp_path: Path) -> None:
@@ -689,4 +734,160 @@ def test_multiple_default_is_rejected() -> None:
 def test_case_outside_switch_is_rejected() -> None:
     with pytest.raises(CompileError, match="case outside of switch"):
         parse("case 1: break;")
+
+
+def test_mutated_param_is_copied() -> None:
+    source = """
+    function inc(a) {
+      a = a + 1;
+      return a;
+    }
+    console.log(inc(3));
+    """
+    project = compile_js(source, sprite="Cat")
+    sprite = _sprite(project)
+    assert "inc__a" in _var_names(sprite)
+    body = _definition_body_ids(sprite["blocks"], "inc %s")
+    sets = [
+        sprite["blocks"][bid]
+        for bid in body
+        if sprite["blocks"][bid].get("opcode") == "data_setvariableto"
+        and sprite["blocks"][bid]["fields"]["VARIABLE"][0] == "inc__a"
+    ]
+    assert sets
+
+
+def test_make_color_snapshots_only_live_returns() -> None:
+    source = """
+    function hexByte(n) {
+      return n;
+    }
+    function makeColor(r, g, b) {
+      return "#" + hexByte(r) + hexByte(g) + hexByte(b);
+    }
+    console.log(makeColor(1, 2, 3));
+    """
+    project = compile_js(source, sprite="Cat")
+    sprite = _sprite(project)
+    names = _var_names(sprite)
+    assert "makeColor__r" not in names
+    assert "makeColor__g" not in names
+    assert "makeColor__b" not in names
+    assert "__t1" in names
+    assert "__t2" in names
+    assert "__t3" not in names
+    body = _definition_body_ids(sprite["blocks"], "makeColor %s %s %s")
+    assert not any(sprite["blocks"][bid].get("opcode") == "control_stop" for bid in body)
+    temps = [
+        sprite["blocks"][bid]["fields"]["VARIABLE"][0]
+        for bid in body
+        if sprite["blocks"][bid].get("opcode") == "data_setvariableto"
+        and sprite["blocks"][bid]["fields"]["VARIABLE"][0].startswith("__t")
+    ]
+    assert temps == ["__t1", "__t2"]
+    return_sets = [
+        sprite["blocks"][bid]
+        for bid in body
+        if sprite["blocks"][bid].get("opcode") == "data_setvariableto"
+        and sprite["blocks"][bid]["fields"]["VARIABLE"][0] == "__return"
+    ]
+    assert return_sets
+
+
+def test_two_calls_snapshot_the_first() -> None:
+    source = """
+    function id(x) {
+      return x;
+    }
+    console.log(id(1), id(2));
+    """
+    project = compile_js(source, sprite="Cat")
+    sprite = _sprite(project)
+    assert "__t1" in _var_names(sprite)
+    hats = _by_opcode(sprite["blocks"], "event_whenflagclicked")
+    script = _script_ids(sprite["blocks"], hats[0][1].get("next"))
+    temp_sets = [
+        sprite["blocks"][bid]
+        for bid in script
+        if sprite["blocks"][bid].get("opcode") == "data_setvariableto"
+        and sprite["blocks"][bid]["fields"]["VARIABLE"][0].startswith("__t")
+    ]
+    assert len(temp_sets) == 1
+
+
+def test_early_return_still_stops() -> None:
+    source = """
+    function pick(x) {
+      if (x) {
+        return 1;
+      }
+      return 2;
+    }
+    console.log(pick(1));
+    """
+    project = compile_js(source, sprite="Cat")
+    blocks = _sprite_blocks(project)
+    stops = _by_opcode(blocks, "control_stop")
+    assert stops
+    for _, node in stops:
+        has_next = str((node.get("mutation") or {}).get("hasnext", "false")) == "true"
+        if not has_next:
+            assert node.get("next") is None
+
+
+def test_no_return_variable_without_functions() -> None:
+    project = compile_js("console.log(1);", sprite="Cat")
+    assert "__return" not in _var_names(_sprite(project))
+
+
+def test_condition_not_and_or_are_operators() -> None:
+    source = """
+    let a = 1;
+    let b = 2;
+    if (!a) {
+      a = 0;
+    }
+    if (a && b) {
+      a = 3;
+    }
+    if (a || b) {
+      a = 4;
+    }
+    """
+    project = compile_js(source, sprite="Cat")
+    blocks = _sprite_blocks(project)
+    assert _by_opcode(blocks, "operator_not")
+    assert _by_opcode(blocks, "operator_and")
+    assert _by_opcode(blocks, "operator_or")
+    names = _var_names(_sprite(project))
+    assert not any(name.startswith("__t") for name in names)
+
+
+def test_compile_nes_example() -> None:
+    project = compile_project(ROOT / "examples" / "js" / "nes")
+    assert project.name == "NES (NROM)"
+    sprite = _sprite(project)
+    blocks = sprite["blocks"]
+    proccodes = _proccodes(blocks)
+    assert "cpuStep" in proccodes
+    assert "renderFrame" in proccodes
+    assert "runSlice" in proccodes
+    assert any(code.startswith("cpuRead") for code in proccodes)
+    assert _by_opcode(blocks, "control_forever")
+    assert _by_opcode(blocks, "sensing_keypressed")
+    assert _by_opcode(blocks, "pen_penDown")
+    assert "pen" in project.to_dict()["extensions"]
+    rom = _list_named(sprite, "rom")
+    pal = _list_named(sprite, "pal")
+    assert rom is not None
+    assert pal is not None
+    assert len(rom) == 24592
+    assert len(pal) == 64
+
+
+def test_nes_rom_txt_matches_ines() -> None:
+    raw = (ROOT / "examples" / "js" / "nes" / "nestest.nes").read_bytes()
+    lines = (ROOT / "examples" / "js" / "nes" / "rom.txt").read_text(encoding="utf-8").splitlines()
+    assert raw[:4] == b"NES\x1a"
+    assert [int(line) for line in lines] == list(raw)
 

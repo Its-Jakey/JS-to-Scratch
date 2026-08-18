@@ -238,10 +238,20 @@ def _as_stack(value: Any) -> list[Block]:
     raise TypeError(f"Expected block or list of blocks, got {type(value)!r}")
 
 
+def _is_decimal_color(value: Any) -> bool:
+    """True for a 24-bit (or ARGB) Scratch color given as a number."""
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
 def _color_hex(value: Any) -> str:
     if isinstance(value, (tuple, list)) and len(value) >= 3:
         r, g, b = (int(value[0]), int(value[1]), int(value[2]))
         return f"#{r:02x}{g:02x}{b:02x}"
+    if _is_decimal_color(value):
+        n = int(value)
+        if n < 0:
+            n += 0x1000000
+        return f"#{n & 0xFFFFFF:06x}"
     text = str(value)
     if not text.startswith("#"):
         text = "#" + text
@@ -517,6 +527,13 @@ def _serialize_input(
             return None
         value = "" if shadow_value is None else shadow_value
         return [SHADOW_ONLY, _primitive_array(spec.kind, value, ctx)]
+    elif spec.kind == "color" and _is_decimal_color(raw):
+        # Scratch accepts packed RGB/ARGB integers in the color slot. Emitting
+        # them as a color primitive would prefix "#" and parse the digits as hex.
+        covering = _primitive_array("number", raw, ctx)
+        default = spec.default if spec.default is not None else "#9966FF"
+        shadow = _primitive_array("color", default, ctx)
+        return [BLOCK_COVERING_SHADOW, covering, shadow]
     else:
         # Literal fills the shadow itself.
         return [SHADOW_ONLY, _primitive_array(spec.kind, raw, ctx)]

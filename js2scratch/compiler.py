@@ -31,11 +31,13 @@ from scratch3.blocks import (
     Not,
     Or,
     PickRandom,
+    ProcedureCall,
     RepeatUntil,
     ReplaceItemOfList,
     Round,
     Say,
     SetVariable,
+    ShowVariable,
     Stop,
     Subtract,
     WhenFlagClicked,
@@ -50,7 +52,7 @@ from js2scratch.ast import (
     ArrayLiteral,
     Assign,
     Binary,
-    Block,
+    Block as AstBlock,
     Break,
     Call,
     DoWhile,
@@ -114,6 +116,8 @@ class NameInfo:
     scratch_name: str
     is_list: bool = False
     is_var: bool = False
+    is_param: bool = False
+    mutated: bool = False
     type: str = UNKNOWN
     declared: bool = False
     line: int = 1
@@ -139,11 +143,12 @@ class Compiler:
         self.functions: dict[str, FuncInfo] = {}
         self.func_name: str | None = None
         self.ret: Variable | None = None
-        self.js_add: CustomBlock | None = None
         self.bw_ops: dict[str, tuple[CustomBlock, Variable]] = {}
         self.and_lut: List | None = None
         self.pow2_lut: List | None = None
+        self.temps: list[Variable] = []
         self.temp_i = 0
+        self.temp_pinned = 0
         self.loop_i = 0
         self.arr_i = 0
         self.switch_i = 0
@@ -151,10 +156,12 @@ class Compiler:
         self.loop_depth = 0
         self.sw_ret: Variable | None = None
         self.sw_ret_needed = False
+        self.return_is_tail = False
 
     def compile(self, program: Program) -> None:
         self._collect(program)
-        self.ret = self.target.variable("__return", 0)
+        if self.functions:
+            self._ensure_return()
         for info in (*self.globals.values(), *(loc for fn in self.functions.values() for loc in fn.locals.values())):
             self._materialize(info)
         for fname, fn in self.functions.items():
@@ -188,6 +195,8 @@ class Compiler:
         return f"{func}__{js_name}"
 
     def _materialize(self, info: NameInfo) -> None:
+        if info.is_param and not info.mutated:
+            return
         if info.is_list:
             info.lst = self.target.list(info.scratch_name, [])
         else:
@@ -240,6 +249,13 @@ class Compiler:
         info.is_list = True
         info.type = ARRAY
 
+    def _mark_param_mutation(self, name: str, func: str | None) -> None:
+        if func is None:
+            return
+        info = self.functions[func].locals.get(name)
+        if info is not None and info.is_param:
+            info.mutated = True
+
     def _collect(self, program: Program) -> None:
         for stmt in program.body:
             if isinstance(stmt, FunctionDecl):
@@ -255,7 +271,8 @@ class Compiler:
         for stmt in program.body:
             if isinstance(stmt, FunctionDecl):
                 for param in stmt.params:
-                    self._declare(param, stmt, func=stmt.name, is_list=False, typ=UNKNOWN)
+                    info = self._declare(param, stmt, func=stmt.name, is_list=False, typ=UNKNOWN)
+                    info.is_param = True
                 self._walk_stmts(stmt.body, stmt.name)
 
     def _walk_stmts(self, stmts: list[Node], func: str | None) -> None:
@@ -267,7 +284,7 @@ class Compiler:
             return
         if isinstance(node, FunctionDecl):
             raise self._error("nested function declarations are not supported", node)
-        if isinstance(node, Block):
+        if isinstance(node, AstBlock):
             self._walk_stmts(node.body, func)
             return
         if isinstance(node, VarDecl):
@@ -314,16 +331,18 @@ class Compiler:
                 self._walk_expr(el, func)
             return
         if isinstance(node, (Binary, Assign)):
-            if isinstance(node, Assign) and isinstance(node.left, Identifier) and (
-                isinstance(node.right, ArrayLiteral) or _is_load_list_call(node.right)
-            ):
-                self._mark_list(node.left.name, node, func)
+            if isinstance(node, Assign) and isinstance(node.left, Identifier):
+                self._mark_param_mutation(node.left.name, func)
+                if isinstance(node.right, ArrayLiteral) or _is_load_list_call(node.right):
+                    self._mark_list(node.left.name, node, func)
             if isinstance(node, Assign) and isinstance(node.left, Index) and isinstance(node.left.object, Identifier):
                 self._mark_list(node.left.object.name, node, func)
             self._walk_expr(node.left, func)
             self._walk_expr(node.right, func)
             return
         if isinstance(node, (Unary, Update)):
+            if isinstance(node, Update) and isinstance(node.argument, Identifier):
+                self._mark_param_mutation(node.argument.name, func)
             if isinstance(node, Update) and isinstance(node.argument, Index) and isinstance(node.argument.object, Identifier):
                 self._mark_list(node.argument.object.name, node, func)
             self._walk_expr(node.argument, func)
@@ -371,9 +390,120 @@ class Compiler:
             raise self._error("first-class functions are not supported", node)
         raise self._error(f"undeclared variable {name!r}", node)
 
+    def _ensure_return(self) -> Variable:
+        if self.ret is None:
+            self.ret = self.target.variable("__return", 0)
+        return self.ret
+
     def _new_temp(self) -> Variable:
         self.temp_i += 1
-        return self.target.variable(f"__t{self.temp_i}", 0)
+        if self.temp_i <= len(self.temps):
+            return self.temps[self.temp_i - 1]
+        var = self.target.variable(f"__t{self.temp_i}", 0)
+        self.temps.append(var)
+        return var
+
+    def _scratch_index(self, idx: Lowered) -> Any:
+        constant = self._numeric_const(idx)
+        if constant is not None:
+            return constant + 1
+        return Add(idx.value, 1)
+
+    def _as_block_list(self, blocks: Any) -> list[Any]:
+        if blocks is None:
+            return []
+        if isinstance(blocks, list):
+            return [block for block in blocks if block is not None]
+        return [blocks]
+
+    def _iter_stack(self, blocks: Any):
+        for block in self._as_block_list(blocks):
+            yield block
+            specs = getattr(block, "input_specs", ())
+            for spec in specs:
+                if spec.kind == "substack":
+                    yield from self._iter_stack(block.inputs.get(spec.name))
+
+    def _call_writes(self, block: ProcedureCall) -> dict[int, Variable]:
+        proto = block.prototype
+        for custom, ret in self.bw_ops.values():
+            if proto is custom:
+                return {id(ret): ret}
+        if self.ret is not None:
+            return {id(self.ret): self.ret}
+        return {}
+
+    def _vars_written(self, blocks: Any) -> dict[int, Variable]:
+        written: dict[int, Variable] = {}
+        for block in self._iter_stack(blocks):
+            if isinstance(block, (SetVariable, ChangeVariable)):
+                var = block.fields.get("VARIABLE")
+                if isinstance(var, Variable):
+                    written[id(var)] = var
+            elif isinstance(block, ProcedureCall):
+                written.update(self._call_writes(block))
+        return written
+
+    def _vars_in_value(self, value: Any) -> dict[int, Variable]:
+        found: dict[int, Variable] = {}
+        if isinstance(value, Variable):
+            found[id(value)] = value
+            return found
+        if isinstance(value, list):
+            for item in value:
+                found.update(self._vars_in_value(item))
+            return found
+        inputs = getattr(value, "inputs", None)
+        fields = getattr(value, "fields", None)
+        if isinstance(inputs, dict):
+            for item in inputs.values():
+                found.update(self._vars_in_value(item))
+        if isinstance(fields, dict):
+            for item in fields.values():
+                if isinstance(item, Variable):
+                    found[id(item)] = item
+        return found
+
+    def _replace_vars(self, value: Any, mapping: dict[int, Variable]) -> Any:
+        if isinstance(value, Variable):
+            return mapping.get(id(value), value)
+        if isinstance(value, list):
+            return [self._replace_vars(item, mapping) for item in value]
+        inputs = getattr(value, "inputs", None)
+        if isinstance(inputs, dict):
+            for key, item in list(inputs.items()):
+                inputs[key] = self._replace_vars(item, mapping)
+        return value
+
+    def _protect_values(self, values: list[Any], subsequent_blocks: list[Any]) -> tuple[list[Any], list[Any]]:
+        written = self._vars_written(subsequent_blocks)
+        live: dict[int, Variable] = {}
+        for value in values:
+            live.update(self._vars_in_value(value))
+        to_save = [live[key] for key in live if key in written]
+        if not to_save:
+            return [], values
+        blocks: list[Any] = []
+        mapping: dict[int, Variable] = {}
+        for var in sorted(to_save, key=lambda item: item.name):
+            tmp = self._new_temp()
+            mapping[id(var)] = tmp
+            blocks.append(SetVariable(tmp, var))
+        return blocks, [self._replace_vars(value, mapping) for value in values]
+
+    def _seq(self, *parts: Lowered) -> tuple[list[Any], list[Lowered]]:
+        blocks: list[Any] = []
+        acc: list[Lowered] = []
+        for part in parts:
+            save, new_vals = self._protect_values([prev.value for prev in acc], part.blocks)
+            blocks.extend(save)
+            acc = [
+                Lowered(prev.blocks, new_vals[i], prev.type, bits=prev.bits)
+                for i, prev in enumerate(acc)
+            ]
+            blocks.extend(part.blocks)
+            acc.append(part)
+        return blocks, acc
 
     def _new_loop_flag(self) -> Variable:
         self.loop_i += 1
@@ -393,28 +523,6 @@ class Compiler:
         if isinstance(value, str):
             return Equals(1, 0) if value == "" else Equals(1, 1)
         return Not(Or(Equals(value, 0), Equals(value, "")))
-
-    def _ensure_js_add(self) -> CustomBlock:
-        if self.js_add is not None:
-            return self.js_add
-        self.js_add = CustomBlock("__js_add %s %s", ["a", "b"], warp=True)
-        a = self.js_add["a"]
-        b = self.js_add["b"]
-        numeric = And(
-            And(Equals(Multiply(a, 1), a), Equals(Multiply(b, 1), b)),
-            And(Not(Equals(a, "")), Not(Equals(b, ""))),
-        )
-        self.target.add_script(
-            Define(
-                self.js_add,
-                IfElse(
-                    numeric,
-                    SetVariable(self.ret, Add(a, b)),
-                    SetVariable(self.ret, Join(a, b)),
-                ),
-            )
-        )
-        return self.js_add
 
     def _numeric_const(self, lowered: Lowered) -> int | float | None:
         if lowered.blocks:
@@ -468,12 +576,10 @@ class Compiler:
         self.bw_ops[key] = (custom, ret)
         return custom, ret
 
-    def _call_bw(self, kind: str, bits: int, left: Lowered, right: Lowered) -> Lowered:
+    def _call_bw(self, kind: str, bits: int, left: Lowered, right: Lowered, blocks: list[Any]) -> Lowered:
         custom, ret = self._ensure_bw(kind, bits)
-        blocks = [*left.blocks, *right.blocks, custom(left.value, right.value)]
-        tmp = self._new_temp()
-        blocks.append(SetVariable(tmp, ret))
-        return Lowered(blocks, tmp, NUMBER, bits=bits)
+        blocks.append(custom(left.value, right.value))
+        return Lowered(blocks, ret, NUMBER, bits=bits)
 
     def _bitwise_not(self, arg: Lowered) -> Lowered:
         constant = self._numeric_const(arg)
@@ -506,7 +612,8 @@ class Compiler:
         left_c: int | float | None,
         right_c: int | float | None,
     ) -> Lowered:
-        blocks = [*left.blocks, *right.blocks]
+        blocks, sequenced = self._seq(left, right)
+        left, right = sequenced
         if left_c is not None and to_uint32(left_c) == 0:
             return Lowered(blocks, 0, NUMBER, bits=8)
         if right_c is not None and to_uint32(right_c) == 0:
@@ -519,7 +626,7 @@ class Compiler:
             modulus = mask_modulus(right_c)
             if modulus is not None:
                 return Lowered(blocks, Mod(left.value, modulus), NUMBER, bits=const_bits(modulus - 1))
-        return self._call_bw("AND", self._and_width(left, right), left, right)
+        return self._call_bw("AND", self._and_width(left, right), left, right, blocks)
 
     def _bitwise_or_xor(
         self,
@@ -529,12 +636,13 @@ class Compiler:
         left_c: int | float | None,
         right_c: int | float | None,
     ) -> Lowered:
-        blocks = [*left.blocks, *right.blocks]
+        blocks, sequenced = self._seq(left, right)
+        left, right = sequenced
         if left_c is not None and to_uint32(left_c) == 0:
             return Lowered(blocks, right.value, NUMBER, bits=right.bits)
         if right_c is not None and to_uint32(right_c) == 0:
             return Lowered(blocks, left.value, NUMBER, bits=left.bits)
-        return self._call_bw(kind, self._or_width(left, right), left, right)
+        return self._call_bw(kind, self._or_width(left, right), left, right, blocks)
 
     def _bitwise_shift(
         self,
@@ -543,7 +651,8 @@ class Compiler:
         right: Lowered,
         right_c: int | float | None,
     ) -> Lowered:
-        blocks = [*left.blocks, *right.blocks]
+        blocks, sequenced = self._seq(left, right)
+        left, right = sequenced
         if right_c is not None:
             shift = to_int32(right_c) & 31
             if shift == 0:
@@ -574,13 +683,20 @@ class Compiler:
             info = fn.locals[param]
             if info.is_list:
                 raise self._error("arrays cannot be function parameters", fn.node)
-            body.append(SetVariable(info.variable, fn.custom[param]))
-        for stmt in fn.node.body:
-            self._extend_stack(body, self._stmt(stmt))
+            if info.mutated:
+                body.append(SetVariable(info.variable, fn.custom[param]))
+        for i, stmt in enumerate(fn.node.body):
+            prev_tail = self.return_is_tail
+            self.return_is_tail = i == len(fn.node.body) - 1 and isinstance(stmt, Return)
+            try:
+                self._extend_stack(body, self._stmt(stmt))
+            finally:
+                self.return_is_tail = prev_tail
         # `stop this script` is a cap; chaining anything after it makes Blockly
         # crash on load (`nextConnection` is null).
-        if not body or not self._is_cap_stop(body[-1]):
-            body.append(SetVariable(self.ret, ""))
+        last_is_return = bool(fn.node.body) and isinstance(fn.node.body[-1], Return)
+        if not last_is_return and (not body or not self._is_cap_stop(body[-1])):
+            body.append(SetVariable(self._ensure_return(), ""))
         self.target.add_script(Define(fn.custom, *body))
         self.func_name = prev
 
@@ -600,11 +716,12 @@ class Compiler:
     def _stmt(self, node: Node | None) -> list[Any]:
         if node is None:
             return []
-        if isinstance(node, Block):
+        if isinstance(node, AstBlock):
             blocks: list[Any] = []
             for stmt in node.body:
                 self._extend_stack(blocks, self._stmt(stmt))
             return blocks
+        self.temp_i = self.temp_pinned
         if isinstance(node, FunctionDecl):
             raise self._error("nested function declarations are not supported", node)
         if isinstance(node, VarDecl):
@@ -701,6 +818,16 @@ class Compiler:
         raise self._error("cannot assign a non-array value to an array", node)
 
     def _condition(self, node: Node) -> tuple[list[Any], Any]:
+        if isinstance(node, Unary) and node.op == "!":
+            prelude, inner = self._condition(node.argument)
+            return prelude, Not(inner)
+        if isinstance(node, Binary) and node.op in ("&&", "||"):
+            left_blocks, left_cond = self._condition(node.left)
+            right_blocks, right_cond = self._condition(node.right)
+            if not left_blocks and not right_blocks:
+                if node.op == "&&":
+                    return [], And(left_cond, right_cond)
+                return [], Or(left_cond, right_cond)
         lowered = self._expr(node)
         return lowered.blocks, self._as_boolean(lowered.value)
 
@@ -718,16 +845,29 @@ class Compiler:
 
     def _while(self, node: While) -> list[Any]:
         assert node.test is not None
+        if self._is_always_true(node.test):
+            self.loop_depth += 1
+            try:
+                body = self._stmt(node.body)
+            finally:
+                self.loop_depth -= 1
+            return [Forever(*body)]
+        prelude, cond = self._condition(node.test)
+        if not prelude:
+            old_pinned = self.temp_pinned
+            self.temp_pinned = max(self.temp_pinned, self.temp_i)
+            self.loop_depth += 1
+            try:
+                body = self._stmt(node.body)
+            finally:
+                self.loop_depth -= 1
+                self.temp_pinned = old_pinned
+            return [RepeatUntil(Not(cond), *body)]
         self.loop_depth += 1
         try:
             body = self._stmt(node.body)
         finally:
             self.loop_depth -= 1
-        if self._is_always_true(node.test):
-            return [Forever(*body)]
-        prelude, cond = self._condition(node.test)
-        if not prelude:
-            return [RepeatUntil(Not(cond), *body)]
         flag = self._new_loop_flag()
         return [
             SetVariable(flag, 1),
@@ -765,17 +905,28 @@ class Compiler:
             blocks.extend(self._stmt(node.init))
         elif node.init is not None:
             blocks.extend(self._expr(node.init, used=False).blocks)
-        self.loop_depth += 1
-        try:
-            body = self._stmt(node.body)
-        finally:
-            self.loop_depth -= 1
-        if node.update is not None:
-            self._extend_stack(body, self._expr(node.update, used=False).blocks)
         if node.test is None or self._is_always_true(node.test):
+            self.loop_depth += 1
+            try:
+                body = self._stmt(node.body)
+            finally:
+                self.loop_depth -= 1
+            if node.update is not None:
+                self._extend_stack(body, self._expr(node.update, used=False).blocks)
             blocks.append(Forever(*body))
             return blocks
         prelude, cond = self._condition(node.test)
+        old_pinned = self.temp_pinned
+        if not prelude:
+            self.temp_pinned = max(self.temp_pinned, self.temp_i)
+        self.loop_depth += 1
+        try:
+            body = self._stmt(node.body)
+            if node.update is not None:
+                self._extend_stack(body, self._expr(node.update, used=False).blocks)
+        finally:
+            self.loop_depth -= 1
+            self.temp_pinned = old_pinned
         if not prelude:
             blocks.append(RepeatUntil(Not(cond), *body))
             return blocks
@@ -797,7 +948,7 @@ class Compiler:
             return False
         if isinstance(node, Return):
             return True
-        if isinstance(node, Block):
+        if isinstance(node, AstBlock):
             return any(self._contains_return(stmt) for stmt in node.body)
         if isinstance(node, IfNode):
             return self._contains_return(node.consequent) or self._contains_return(node.alternate)
@@ -881,14 +1032,16 @@ class Compiler:
     def _return(self, node: Return) -> list[Any]:
         if self.func_name is None:
             raise self._error("return outside of function", node)
+        ret = self._ensure_return()
         if node.argument is None:
-            blocks: list[Any] = [SetVariable(self.ret, "")]
+            blocks: list[Any] = [SetVariable(ret, "")]
         else:
             lowered = self._expr(node.argument)
-            blocks = [*lowered.blocks, SetVariable(self.ret, lowered.value)]
+            blocks = [*lowered.blocks, SetVariable(ret, lowered.value)]
         if self.sw_ret_needed:
             blocks.append(SetVariable(self._ensure_sw_ret(), 1))
-        blocks.append(Stop("this script"))
+        if not self.return_is_tail or self.switch_depth or self.loop_depth:
+            blocks.append(Stop("this script"))
         return blocks
 
     def _expr(self, node: Node | None, used: bool = True) -> Lowered:
@@ -932,6 +1085,11 @@ class Compiler:
         info = self._lookup(node.name, node)
         if info.is_list:
             return Lowered([], info.lst, ARRAY)
+        if info.is_param and not info.mutated:
+            assert self.func_name is not None
+            custom = self.functions[self.func_name].custom
+            assert custom is not None
+            return Lowered([], custom[info.js_name], info.type, bits=info.bits)
         return Lowered([], info.variable, info.type, bits=info.bits)
 
     def _array_literal(self, node: ArrayLiteral) -> Lowered:
@@ -946,7 +1104,10 @@ class Compiler:
             return self._logic_or(node)
         left = self._expr(node.left)
         right = self._expr(node.right)
-        blocks = [*left.blocks, *right.blocks]
+        if op in ("&", "|", "^", "<<", ">>", ">>>"):
+            return self._bitwise(op, left, right, node)
+        blocks, sequenced = self._seq(left, right)
+        left, right = sequenced
         lv, rv = left.value, right.value
         if op == "+":
             return self._add(blocks, left, right, node)
@@ -965,21 +1126,12 @@ class Compiler:
             return Lowered(blocks, Not(GreaterThan(lv, rv)), BOOLEAN)
         if op == ">=":
             return Lowered(blocks, Not(LessThan(lv, rv)), BOOLEAN)
-        if op in ("&", "|", "^", "<<", ">>", ">>>"):
-            return self._bitwise(op, left, right, node)
         raise self._error(f"unsupported operator {op!r}", node)
 
     def _add(self, blocks: list[Any], left: Lowered, right: Lowered, node: Node) -> Lowered:
         if left.type == STRING or right.type == STRING:
             return Lowered(blocks, Join(left.value, right.value), STRING)
-        numeric = {NUMBER, BOOLEAN}
-        if left.type in numeric and right.type in numeric:
-            return Lowered(blocks, Add(left.value, right.value), NUMBER)
-        helper = self._ensure_js_add()
-        blocks.append(helper(left.value, right.value))
-        tmp = self._new_temp()
-        blocks.append(SetVariable(tmp, self.ret))
-        return Lowered(blocks, tmp, UNKNOWN)
+        return Lowered(blocks, Add(left.value, right.value), NUMBER)
 
     def _logic_and(self, node: Binary) -> Lowered:
         left = self._expr(node.left)
@@ -1032,9 +1184,10 @@ class Compiler:
         if isinstance(target, Index):
             obj = self._expr(target.object)
             idx = self._expr(target.index)
-            scratch_index = Add(idx.value, 1)
+            blocks, sequenced = self._seq(obj, idx)
+            obj, idx = sequenced
+            scratch_index = self._scratch_index(idx)
             current = ItemOfList(scratch_index, obj.value)
-            blocks = [*obj.blocks, *idx.blocks]
             if node.prefix:
                 nxt = Add(current, delta) if delta == 1 else Subtract(current, 1)
                 blocks.append(ReplaceItemOfList(scratch_index, obj.value, nxt))
@@ -1083,8 +1236,9 @@ class Compiler:
             obj = self._expr(node.left.object)
             idx = self._expr(node.left.index)
             right = self._expr(node.right)
-            blocks = [*obj.blocks, *idx.blocks, *right.blocks]
-            blocks.append(ReplaceItemOfList(Add(idx.value, 1), obj.value, right.value))
+            blocks, sequenced = self._seq(obj, idx, right)
+            obj, idx, right = sequenced
+            blocks.append(ReplaceItemOfList(self._scratch_index(idx), obj.value, right.value))
             return Lowered(blocks, right.value, right.type)
         raise self._error("invalid assignment target", node)
 
@@ -1094,10 +1248,12 @@ class Compiler:
             return self._bitwise(bitwise[op], left, right, node)
         mapping = {"+=": "+", "-=": "-", "*=": "*", "/=": "/", "%=": "%"}
         binary = Binary(op=mapping[op], left=None, right=None, line=node.line, column=node.column)
+        blocks, sequenced = self._seq(left, right)
+        left, right = sequenced
         if op == "+=":
-            return self._add([*left.blocks, *right.blocks], left, right, binary)
+            return self._add(blocks, left, right, binary)
         arith = {"-=": Subtract, "*=": Multiply, "/=": Divide, "%=": Mod}
-        return Lowered([*left.blocks, *right.blocks], arith[op](left.value, right.value), NUMBER)
+        return Lowered(blocks, arith[op](left.value, right.value), NUMBER)
 
     def _member(self, node: Member) -> Lowered:
         if isinstance(node.object, Identifier) and node.object.name in RESERVED_BUILTINS:
@@ -1118,8 +1274,9 @@ class Compiler:
     def _index(self, node: Index) -> Lowered:
         obj = self._expr(node.object)
         idx = self._expr(node.index)
-        blocks = [*obj.blocks, *idx.blocks]
-        scratch_index = Add(idx.value, 1)
+        blocks, sequenced = self._seq(obj, idx)
+        obj, idx = sequenced
+        scratch_index = self._scratch_index(idx)
         if obj.type == STRING:
             return Lowered(blocks, LetterOf(scratch_index, obj.value), STRING)
         return Lowered(blocks, ItemOfList(scratch_index, obj.value), UNKNOWN)
@@ -1135,6 +1292,8 @@ class Compiler:
     def _call_ident(self, node: Call, callee: Identifier, used: bool) -> Lowered:
         if callee.name == "loadList":
             return self._load_list(node)
+        if callee.name == "showVariable":
+            return self._show_variable(node)
         if callee.name in DRAW_BUILTINS and callee.name not in self.functions:
             return self._draw_builtin(node, callee.name)
         if callee.name not in self.functions:
@@ -1146,18 +1305,11 @@ class Compiler:
                 f"{callee.name}() expected {len(fn.node.params)} argument(s), got {len(node.arguments)}",
                 node,
             )
-        blocks: list[Any] = []
-        values: list[Any] = []
-        for arg in node.arguments:
-            lowered = self._expr(arg)
-            blocks.extend(lowered.blocks)
-            values.append(lowered.value)
+        arg_parts = [self._expr(arg) for arg in node.arguments]
+        blocks, sequenced = self._seq(*arg_parts)
+        values = [part.value for part in sequenced]
         blocks.append(fn.custom(*values))
-        if not used:
-            return Lowered(blocks, self.ret, UNKNOWN)
-        tmp = self._new_temp()
-        blocks.append(SetVariable(tmp, self.ret))
-        return Lowered(blocks, tmp, UNKNOWN)
+        return Lowered(blocks, self._ensure_return(), UNKNOWN)
 
     def _call_member(self, node: Call, callee: Member, used: bool) -> Lowered:
         if isinstance(callee.object, Identifier) and callee.object.name == "console":
@@ -1176,13 +1328,9 @@ class Compiler:
         )
 
     def _lower_args(self, node: Call) -> tuple[list[Any], list[Any]]:
-        blocks: list[Any] = []
-        values: list[Any] = []
-        for arg in node.arguments:
-            lowered = self._expr(arg)
-            blocks.extend(lowered.blocks)
-            values.append(lowered.value)
-        return blocks, values
+        parts = [self._expr(arg) for arg in node.arguments]
+        blocks, sequenced = self._seq(*parts)
+        return blocks, [part.value for part in sequenced]
 
     def _draw_builtin(self, node: Call, name: str) -> Lowered:
         argc, factory, kind = DRAW_BUILTINS[name]
@@ -1209,12 +1357,9 @@ class Compiler:
         return Lowered(blocks, "", VOID)
 
     def _console_log(self, node: Call, used: bool) -> Lowered:
-        blocks: list[Any] = []
-        values: list[Any] = []
-        for arg in node.arguments:
-            lowered = self._expr(arg)
-            blocks.extend(lowered.blocks)
-            values.append(lowered.value)
+        parts = [self._expr(arg) for arg in node.arguments]
+        blocks, sequenced = self._seq(*parts)
+        values = [part.value for part in sequenced]
         message: Any = ""
         if values:
             message = values[0]
@@ -1240,8 +1385,10 @@ class Compiler:
                 raise self._error("Math.pow() takes 2 arguments", node)
             base = self._expr(node.arguments[0])
             exp = self._expr(node.arguments[1])
+            blocks, sequenced = self._seq(base, exp)
+            base, exp = sequenced
             return Lowered(
-                [*base.blocks, *exp.blocks],
+                blocks,
                 MathOp("e ^", Multiply(exp.value, MathOp("ln", base.value))),
                 NUMBER,
             )
@@ -1267,10 +1414,28 @@ class Compiler:
             raise self._error("push() takes 1 argument", node)
         obj = self._expr(callee.object)
         item = self._expr(node.arguments[0])
-        blocks = [*obj.blocks, *item.blocks, AddToList(item.value, obj.value)]
+        blocks, sequenced = self._seq(obj, item)
+        obj, item = sequenced
+        blocks.append(AddToList(item.value, obj.value))
         if used:
             return Lowered(blocks, LengthOfList(obj.value), NUMBER)
         return Lowered(blocks, "", VOID)
+
+    def _show_variable(self, node: Call) -> Lowered:
+        if len(node.arguments) != 1:
+            raise self._error("showVariable() takes 1 argument", node)
+        arg = node.arguments[0]
+        if isinstance(arg, Identifier):
+            name = arg.name
+        elif isinstance(arg, Literal) and arg.kind == "string":
+            name = str(arg.value)
+        else:
+            raise self._error("showVariable() needs a variable name", node)
+        info = self._lookup(name, arg)
+        if info.is_list or info.variable is None:
+            raise self._error(f"showVariable() cannot show {name!r}", node)
+        info.variable.show = True
+        return Lowered([ShowVariable(info.variable)], "", VOID)
 
     def _load_list(self, node: Call) -> Lowered:
         values = self._read_load_list(node)

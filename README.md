@@ -373,6 +373,7 @@ Motion blocks on the stage still serialize; Scratch no-ops most of them at runti
 
 - [`examples/hello_world.py`](examples/hello_world.py)
 - [`examples/pen_test.py`](examples/pen_test.py)
+- [`examples/js/engine3d`](examples/js/engine3d) — textured 3D plaza (js2scratch; WASD + arrows)
 
 ---
 
@@ -383,6 +384,7 @@ Compile a stripped-down JavaScript into `.sb3` files (same block library, differ
 ```bash
 python -m js2scratch examples/js/hello_world -o hello_world.sb3
 python -m js2scratch examples/js/pen -o pen.sb3
+python -m js2scratch examples/js/engine3d -o engine3d.sb3
 ```
 
 ```javascript

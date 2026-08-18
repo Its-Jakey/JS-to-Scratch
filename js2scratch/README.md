@@ -96,10 +96,10 @@ Function locals are renamed (`foo__x`) so two functions can both have an `x`. Un
 - Assignment: `=` `+=` `-=` `*=` `/=` `%=` `&=` `|=` `^=` `<<=` `>>=` `>>>=` `++` `--`
 - Comparison: `==` and `===` both become Scratch `=`; `!=` / `!==` become `not (=)`
 - Relational: `<` `>` `<=` `>=`
-- Logic: `&&` `||` `!` (short-circuit with temps, JS-like: they yield a value, not only a boolean)
+- Logic: `&&` `||` `!` (JS-like values via temps when used as expressions; `if`/`while` conditions use Scratch `and`/`or`/`not` when both sides are pure)
 - Bitwise: `&` `|` `^` `~` `<<` `>>` `>>>` (see below)
 
-`+` is JS-like when types are known: two numbers → `Add`; either side a string → `Join`; otherwise a generated `__js_add` helper chooses at runtime.
+`+` is Scratch `Add` unless a side is a known string, in which case it becomes `Join`.
 
 Scratch has no native bitwise ops. `&` uses a 256×256 `andLUT` list (byte `i & j` at index `i * 256 + j + 1`) via custom blocks `AND8` / `AND16` / `AND32` — 8-bit is one lookup, 32-bit is four. `|` is `(a + b) - (a & b)` (`OR8` / `OR16` / `OR32`). `^` is `(a + b) - (2 * (a & b))` (`XOR8` / `XOR16` / `XOR32`). Only the widths that appear in the program are emitted, and `andLUT` is omitted if AND is never needed.
 
@@ -143,7 +143,7 @@ function add(a, b) {
 console.log(add(1, 2));
 ```
 
-Each function is a Scratch **custom block** (`warp` on). Parameters are copied into mutable locals so `a = a + 1` works. `return` sets a sprite variable `__return` and runs `stop this script`. After a call, the compiler copies `__return` into a temp (`__t1`, …) so the next call cannot clobber it.
+Each function is a Scratch **custom block** (`warp` on). Read-only parameters are used as argument reporters. If a parameter is assigned (`a = a + 1`, `a++`, …) it is copied into a mutable local (`foo__a`) first, because Scratch argument reporters cannot be written. `return` sets a sprite variable `__return`. If that `return` is the last statement of the function, the custom block just ends; early returns (and returns inside loops or `switch`) still run `stop this script`. After a call, the compiler only copies `__return` into a temp (`__t1`, …) when a later block would overwrite it before the value is used.
 
 Nested function declarations, function expressions, arrow functions, callbacks, and first-class functions are errors.
 
@@ -253,6 +253,8 @@ The sprite must **move** after `pen.down()` or nothing visible is drawn. Use the
 | `hide()` / `show()` | hide / show the sprite |
 | `wait(seconds)` | wait () seconds (Scratch wait, not `async`) |
 | `keyPressed(name)` | key `name` pressed? (`"space"`, `"left arrow"`, `"a"`, …) |
+| `timer()` / `resetTimer()` | timer reporter / reset timer |
+| `showVariable("fps")` | show variable monitor on the stage |
 
 `xPosition()` and friends are reporters, so they nest in expressions:
 
@@ -285,7 +287,7 @@ Explicit compile errors (not a complete list of every JS feature):
 2. **Collect** functions vs top-level statements; classify names as variables or lists.
 3. **Lower** expressions to `(prelude stack blocks, reporter)`:
    - Pure math stays nested: `Say(Add(1, Multiply(2, 3)))`
-   - User calls are stack blocks: call, then `set __tN to __return`
+   - User calls are stack blocks. The result stays in `__return` unless a later call (or other write) would clobber it, in which case it is copied to `__tN`.
 4. **Emit** `Define` scripts for each function, then `WhenFlagClicked` for top-level code.
 
 Scratch has no returning reporters for custom blocks, which is why functions use `__return`.
@@ -298,3 +300,5 @@ Scratch has no returning reporters for custom blocks, which is why functions use
 - [`examples/js/functions`](../examples/js/functions) — `add` + `console.log(add(1, 2))`
 - [`examples/js/pen`](../examples/js/pen) — pen spiral (same idea as [`examples/pen_test.py`](../examples/pen_test.py))
 - [`examples/js/space_invaders`](../examples/js/space_invaders) — CHIP-8 emulator with Space Invaders ROM hardcoded
+- [`examples/js/nes`](../examples/js/nes) — NROM NES emulator (6502 + PPU, stub APU). Bundled ROM is nestest; swap games with `python rom_to_txt.py game.nes`
+- [`examples/js/engine3d`](../examples/js/engine3d) — textured scanline 3D engine (cobblestone plaza demo). WASD move, arrows look.
