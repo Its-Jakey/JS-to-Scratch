@@ -18,6 +18,7 @@ include = ["scratch3*", "js2scratch*"]
 
 [tool.setuptools.package-data]
 scratch3 = ["assets/*.svg"]
+js2scratch = ["runtime/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

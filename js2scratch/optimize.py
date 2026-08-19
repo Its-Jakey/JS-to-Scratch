@@ -12,6 +12,7 @@ from js2scratch.ast import (
     Block,
     Break,
     Call,
+    Conditional,
     DoWhile,
     ExpressionStmt,
     For,
@@ -206,6 +207,23 @@ def _fold_expr(node: Node | None) -> tuple[Node | None, bool]:
         if not (a or b):
             return node, False
         return Assign(op=node.op, left=left, right=right, line=node.line, column=node.column), True
+    if isinstance(node, Conditional):
+        test, a = _fold_expr(node.test)
+        cons, b = _fold_expr(node.consequent)
+        alt, c = _fold_expr(node.alternate)
+        if isinstance(test, Literal):
+            truthy = not (
+                (test.kind == "boolean" and not test.value)
+                or (test.kind == "number" and test.value == 0)
+                or (test.kind == "string" and test.value == "")
+                or test.kind == "null"
+            )
+            return (cons if truthy else alt), True
+        if not (a or b or c):
+            return node, False
+        return Conditional(
+            test=test, consequent=cons, alternate=alt, line=node.line, column=node.column
+        ), True
     if isinstance(node, Update):
         arg, did = _fold_expr(node.argument)
         if not did:
@@ -393,6 +411,8 @@ def _children(node: Node) -> list[Node | None]:
         return [node.expression]
     if isinstance(node, (Binary, Assign)):
         return [node.left, node.right]
+    if isinstance(node, Conditional):
+        return [node.test, node.consequent, node.alternate]
     if isinstance(node, (Unary, Update)):
         return [node.argument]
     if isinstance(node, Call):
@@ -552,6 +572,15 @@ def _inline_expr(node: Node | None, inlinable: dict[str, FunctionDecl]) -> tuple
         if not changed:
             return node, False
         return ArrayLiteral(elements=els, line=node.line, column=node.column), True
+    if isinstance(node, Conditional):
+        test, a = _inline_expr(node.test, inlinable)
+        cons, b = _inline_expr(node.consequent, inlinable)
+        alt, c = _inline_expr(node.alternate, inlinable)
+        if not (a or b or c):
+            return node, False
+        return Conditional(
+            test=test, consequent=cons, alternate=alt, line=node.line, column=node.column
+        ), True
     if isinstance(node, Update):
         arg, did = _inline_expr(node.argument, inlinable)
         if not did:

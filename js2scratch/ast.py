@@ -135,6 +135,13 @@ class Assign(Node):
 
 
 @dataclass
+class Conditional(Node):
+    test: Node | None = None
+    consequent: Node | None = None
+    alternate: Node | None = None
+
+
+@dataclass
 class Call(Node):
     callee: Node | None = None
     arguments: list[Node] = field(default_factory=list)

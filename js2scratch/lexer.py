@@ -85,6 +85,7 @@ class Token:
     line: int
     column: int
     newline_before: bool = False
+    start: int = 0
 
 
 class Lexer:
@@ -163,9 +164,10 @@ class Lexer:
         newline_before = self._newline_pending
         self._newline_pending = False
         if self.i >= len(self.source):
-            return Token("EOF", None, self.line, self.column, newline_before)
+            return Token("EOF", None, self.line, self.column, newline_before, start=self.i)
 
         line, column = self.line, self.column
+        start = self.i
         ch = self._peek()
 
         if ch in "\"'":
@@ -184,25 +186,25 @@ class Lexer:
         if four in FOUR_CHAR:
             for _ in range(4):
                 self._advance()
-            return Token(four, four, line, column, newline_before)
+            return Token(four, four, line, column, newline_before, start=start)
 
         three = self.source[self.i : self.i + 3]
         if three in THREE_CHAR:
             for _ in range(3):
                 self._advance()
-            return Token(three, three, line, column, newline_before)
+            return Token(three, three, line, column, newline_before, start=start)
 
         two = self.source[self.i : self.i + 2]
         if two in TWO_CHAR:
             self._advance()
             self._advance()
-            return Token(two, two, line, column, newline_before)
+            return Token(two, two, line, column, newline_before, start=start)
 
         if ch == "." and self._peek(1) == "." and self._peek(2) == ".":
             self._error("spread/rest syntax is not supported", line, column)
 
         self._advance()
-        return Token(ch, ch, line, column, newline_before)
+        return Token(ch, ch, line, column, newline_before, start=start)
 
     def _ident(self, newline_before: bool) -> Token:
         line, column = self.line, self.column
@@ -215,8 +217,8 @@ class Lexer:
                 break
         text = self.source[start:self.i]
         if text in KEYWORDS:
-            return Token(text, text, line, column, newline_before)
-        return Token("IDENT", text, line, column, newline_before)
+            return Token(text, text, line, column, newline_before, start=start)
+        return Token("IDENT", text, line, column, newline_before, start=start)
 
     def _number(self, newline_before: bool) -> Token:
         line, column = self.line, self.column
@@ -229,7 +231,7 @@ class Lexer:
             while self._peek() and self._peek() in "0123456789abcdefABCDEF":
                 self._advance()
             text = self.source[start:self.i]
-            return Token("NUMBER", float(int(text, 16)), line, column, newline_before)
+            return Token("NUMBER", float(int(text, 16)), line, column, newline_before, start=start)
 
         while self._peek().isdigit():
             self._advance()
@@ -251,16 +253,17 @@ class Lexer:
             value = float(text)
         else:
             value = int(text)
-        return Token("NUMBER", value, line, column, newline_before)
+        return Token("NUMBER", value, line, column, newline_before, start=start)
 
     def _string(self, newline_before: bool) -> Token:
         line, column = self.line, self.column
+        start = self.i
         quote = self._advance()
         chars: list[str] = []
         while self.i < len(self.source):
             ch = self._advance()
             if ch == quote:
-                return Token("STRING", "".join(chars), line, column, newline_before)
+                return Token("STRING", "".join(chars), line, column, newline_before, start=start)
             if ch == "\n":
                 self._error("unterminated string", line, column)
             if ch != "\\":

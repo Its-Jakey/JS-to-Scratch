@@ -53,7 +53,7 @@ MATH_SPECIAL = {"round", "random", "pow", "max", "min"}
 
 ALLOWED_MATH = set(MATH_UNARY) | MATH_SPECIAL
 
-RESERVED_BUILTINS = {"Math", "console", "pen", "loadList"}
+RESERVED_BUILTINS = {"Math", "console", "pen", "loadList", "loadBin"}
 
 # name -> (arg_count, factory)  factory(*lowered_values) -> stack block
 PEN_METHODS = {

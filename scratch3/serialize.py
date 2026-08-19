@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from scratch3.blocks.spec import SerializeContext, serialize_script
+from scratch3.refs import BinaryU32Source
 
 if TYPE_CHECKING:
     from scratch3.project import Project
@@ -108,10 +109,14 @@ def _variables_json(target: Target) -> dict[str, Any]:
 
 
 def _lists_json(target: Target) -> dict[str, Any]:
-    return {
-        lst.id: [lst.name, list(lst.values)]
-        for lst in target.lists.values()
-    }
+    result: dict[str, Any] = {}
+    for lst in target.lists.values():
+        if lst.binary_source is not None:
+            values: Any = lst.binary_source
+        else:
+            values = list(lst.values)
+        result[lst.id] = [lst.name, values]
+    return result
 
 
 def _broadcasts_json(target: Target) -> dict[str, str]:
@@ -155,7 +160,7 @@ def _monitors_for(target: Target) -> list[dict[str, Any]]:
                 "opcode": "data_listcontents",
                 "params": {"LIST": lst.name},
                 "spriteName": sprite_name,
-                "value": list(lst.values),
+                "value": list(lst.values) if lst.binary_source is None else [],
                 "width": 100,
                 "height": 200,
                 "x": 5,

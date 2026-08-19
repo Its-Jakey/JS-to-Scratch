@@ -46,12 +46,49 @@ class Variable:
 
 
 @dataclass
+class BinaryU32Source:
+    """List values packed as little-endian u32 words in a binary file.
+
+    Used so huge assets (BIOS/disc images) are not fully loaded into Python
+    lists before JSON serialization.
+    """
+
+    path: Path
+    pack: int = 4
+
+
+def iter_u32_le(path: str | Path, chunk_size: int = 1 << 20):
+    """Yield unsigned little-endian 32-bit words from a binary file.
+
+    A trailing partial word is zero-padded.
+    """
+    path = Path(path)
+    with path.open("rb") as handle:
+        buf = b""
+        while True:
+            chunk = handle.read(chunk_size)
+            if not chunk:
+                break
+            buf += chunk
+            n = len(buf) - (len(buf) % 4)
+            mv = memoryview(buf)
+            for i in range(0, n, 4):
+                yield int.from_bytes(mv[i : i + 4], "little")
+            buf = buf[n:]
+        if buf:
+            buf = buf + b"\x00" * (4 - len(buf) % 4)
+            for i in range(0, len(buf), 4):
+                yield int.from_bytes(buf[i : i + 4], "little")
+
+
+@dataclass
 class List:
     name: str
     values: list[Any] = field(default_factory=list)
     show: bool = False
     id: str = field(default_factory=new_id)
     sprite_name: str | None = None
+    binary_source: BinaryU32Source | None = None
 
 
 @dataclass

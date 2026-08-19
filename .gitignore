@@ -33,6 +33,13 @@ pip-wheel-metadata/
 *.sb3
 *.sb2
 
+# PSX example BIOS dump (extracted from bios.inc) and GT2 disc (not committed)
+examples/js/ps1/bios.bin
+examples/js/ps1/gt2.bin
+examples/js/psx/bios.bin
+examples/js/psx/gt2.bin
+examples/js/PSX/ps1-scratch/Gran Turismo 2*/**.bin
+
 # Environment and secrets
 .env
 .env.*

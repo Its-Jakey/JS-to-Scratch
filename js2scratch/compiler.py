@@ -45,7 +45,7 @@ from scratch3.blocks import (
 )
 from scratch3.blocks.spec import BooleanBlock
 from scratch3.project import Project
-from scratch3.refs import List, Variable, load_list_file
+from scratch3.refs import BinaryU32Source, List, Variable, load_list_file
 from scratch3.target import Target
 
 from js2scratch.ast import (
@@ -55,6 +55,7 @@ from js2scratch.ast import (
     Block as AstBlock,
     Break,
     Call,
+    Conditional,
     DoWhile,
     ExpressionStmt,
     For,
@@ -293,7 +294,7 @@ class Compiler:
             self._walk_stmts(node.body, func)
             return
         if isinstance(node, VarDecl):
-            is_list = isinstance(node.init, ArrayLiteral) or _is_load_list_call(node.init)
+            is_list = isinstance(node.init, ArrayLiteral) or _is_baked_list_call(node.init)
             typ = ARRAY if is_list else self._literal_type(node.init)
             self._declare(node.name, node, func=func, is_list=is_list, typ=typ)
             self._walk_expr(node.init, func)
@@ -340,12 +341,17 @@ class Compiler:
         if isinstance(node, (Binary, Assign)):
             if isinstance(node, Assign) and isinstance(node.left, Identifier):
                 self._mark_param_mutation(node.left.name, func)
-                if isinstance(node.right, ArrayLiteral) or _is_load_list_call(node.right):
+                if isinstance(node.right, ArrayLiteral) or _is_baked_list_call(node.right):
                     self._mark_list(node.left.name, node, func)
             if isinstance(node, Assign) and isinstance(node.left, Index) and isinstance(node.left.object, Identifier):
                 self._mark_list(node.left.object.name, node, func)
             self._walk_expr(node.left, func)
             self._walk_expr(node.right, func)
+            return
+        if isinstance(node, Conditional):
+            self._walk_expr(node.test, func)
+            self._walk_expr(node.consequent, func)
+            self._walk_expr(node.alternate, func)
             return
         if isinstance(node, (Unary, Update)):
             if isinstance(node, Update) and isinstance(node.argument, Identifier):
@@ -436,6 +442,11 @@ class Compiler:
         if isinstance(node, (Binary, Assign)):
             self._mark_uses_expr(node.left, True)
             self._mark_uses_expr(node.right, True)
+            return
+        if isinstance(node, Conditional):
+            self._mark_uses_expr(node.test, True)
+            self._mark_uses_expr(node.consequent, True)
+            self._mark_uses_expr(node.alternate, True)
             return
         if isinstance(node, (Unary, Update)):
             self._mark_uses_expr(node.argument, True)
@@ -832,7 +843,7 @@ class Compiler:
             if info.is_list:
                 return [DeleteAllOfList(info.lst)]
             return [SetVariable(info.variable, 0)]
-        if info.is_list or isinstance(node.init, ArrayLiteral) or _is_load_list_call(node.init):
+        if info.is_list or isinstance(node.init, ArrayLiteral) or _is_baked_list_call(node.init):
             return self._fill_list(info.lst if info.lst is not None else self._lookup(node.name, node).lst, node.init)
         lowered = self._expr(node.init)
         info.type = lowered.type if lowered.type != UNKNOWN else info.type
@@ -860,9 +871,13 @@ class Compiler:
     def _fill_list(self, lst: List | None, node: Node) -> list[Any]:
         if lst is None:
             raise self._error("internal error: missing list", node)
+        if _is_load_bin_call(node):
+            self._attach_load_bin(lst, node)
+            return []
         if _is_load_list_call(node):
             values = self._read_load_list(node)
             lst.values = values
+            lst.binary_source = None
             if not values:
                 return [DeleteAllOfList(lst)]
             return []
@@ -1233,6 +1248,8 @@ class Compiler:
             return self._member(node)
         if isinstance(node, Index):
             return self._index(node)
+        if isinstance(node, Conditional):
+            return self._conditional(node)
         raise self._error(f"unsupported expression {type(node).__name__}", node)
 
     def _literal(self, node: Literal) -> Lowered:
@@ -1502,6 +1519,8 @@ class Compiler:
     def _call_ident(self, node: Call, callee: Identifier, used: bool) -> Lowered:
         if callee.name == "loadList":
             return self._load_list(node)
+        if callee.name == "loadBin":
+            return self._load_bin(node)
         if callee.name == "showVariable":
             return self._show_variable(node)
         if callee.name in DRAW_BUILTINS and callee.name not in self.functions:
@@ -1649,13 +1668,54 @@ class Compiler:
         info.variable.show = True
         return Lowered([ShowVariable(info.variable)], "", VOID)
 
+    def _conditional(self, node: Conditional) -> Lowered:
+        assert node.test is not None and node.consequent is not None and node.alternate is not None
+        prelude, cond = self._condition(node.test)
+        then_part = self._expr(node.consequent)
+        else_part = self._expr(node.alternate)
+        tmp = self._new_temp()
+        blocks = [
+            *prelude,
+            IfElse(
+                cond,
+                [*then_part.blocks, SetVariable(tmp, then_part.value)],
+                [*else_part.blocks, SetVariable(tmp, else_part.value)],
+            ),
+        ]
+        typ = then_part.type if then_part.type == else_part.type else UNKNOWN
+        return Lowered(blocks, tmp, typ)
+
     def _load_list(self, node: Call) -> Lowered:
         values = self._read_load_list(node)
         lst = self._new_array()
         lst.values = values
+        lst.binary_source = None
         if not values:
             return Lowered([DeleteAllOfList(lst)], lst, ARRAY)
         return Lowered([], lst, ARRAY)
+
+    def _load_bin(self, node: Call) -> Lowered:
+        lst = self._new_array()
+        self._attach_load_bin(lst, node)
+        return Lowered([], lst, ARRAY)
+
+    def _load_bin_path(self, node: Call) -> Path:
+        if len(node.arguments) != 1:
+            raise self._error("loadBin() takes 1 argument", node)
+        arg = node.arguments[0]
+        if not isinstance(arg, Literal) or arg.kind != "string":
+            raise self._error("loadBin() path must be a string literal", node)
+        path = Path(str(arg.value))
+        if not path.is_absolute():
+            path = self.base_dir / path
+        if not path.is_file():
+            raise self._error(f"cannot read binary file {arg.value!r}: not found", node)
+        return path
+
+    def _attach_load_bin(self, lst: List, node: Call) -> None:
+        path = self._load_bin_path(node)
+        lst.values = []
+        lst.binary_source = BinaryU32Source(path=path, pack=4)
 
     def _read_load_list(self, node: Call) -> list[Any]:
         if len(node.arguments) != 1:
@@ -1679,6 +1739,18 @@ def _is_load_list_call(node: Node | None) -> bool:
         and isinstance(node.callee, Identifier)
         and node.callee.name == "loadList"
     )
+
+
+def _is_load_bin_call(node: Node | None) -> bool:
+    return (
+        isinstance(node, Call)
+        and isinstance(node.callee, Identifier)
+        and node.callee.name == "loadBin"
+    )
+
+
+def _is_baked_list_call(node: Node | None) -> bool:
+    return _is_load_list_call(node) or _is_load_bin_call(node)
 
 
 def compile_into(source: str, target: Target, filename: str | None = None) -> None:

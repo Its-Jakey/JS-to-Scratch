@@ -6,6 +6,8 @@ This is a real compiler: source is parsed as JavaScript, then lowered into Scrat
 
 ```bash
 pip install -e .
+python -m js2scratch.run examples/js/hello_world
+python -m js2scratch.run examples/js/pen
 python -m js2scratch examples/js/hello_world -o hello_world.sb3
 python -m js2scratch examples/js/pen -o pen.sb3
 ```
@@ -21,6 +23,10 @@ project.save("hello.sb3")
 project = compile_project("examples/js/pen")
 project.save("pen.sb3")
 ```
+
+`python -m js2scratch.run <file-or-folder>` serves a local browser runtime (green flag, 480×360 stage, keyboard, pen) so you can execute the JavaScript **before** compiling. `wait(0)` yields a frame; `Math.sin` / `cos` / `tan` use **degrees**, matching Scratch. Bitwise operators use native JavaScript (not the compiler’s LUT), which is the point: if it is wrong in the runner, it is almost certainly the source; if it is right here and wrong in Scratch, look at the compiler.
+
+The runner is not a Scratch VM (no clones, broadcasts, or TurboWarp warp). Huge `loadBin` files (for example a full PS1 disc) may run out of memory in the browser; BIOS + a stub disc is enough to iterate. Do not open the HTML as a file — the server sends COOP/COEP headers so `SharedArrayBuffer` can implement blocking `wait`.
 
 Open the `.sb3` in the [Scratch editor](https://scratch.mit.edu/projects/editor/) (**File → Load from your computer**).
 
@@ -132,7 +138,7 @@ switch (x) {
 
 `switch` becomes one custom block per case (plus a dispatcher custom block). `break` is `stop this script` inside that case. A case without `break` calls the next case (JS fall-through). If a case `return`s from the enclosing function, the case sets `__sw_ret` and the switch call site stops the function script; that flag is omitted when no case returns.
 
-**Not in this subset:** `break` / `continue` in loops, `try` / `catch`, ternary `? :`.
+**Not in this subset:** `break` / `continue` in loops, `try` / `catch`. Ternary `? :` is supported.
 
 ### Functions
 
@@ -173,7 +179,7 @@ Arrays cannot be function parameters. String `.length` uses the string-length re
 
 ## Builtins
 
-These are compile-time names, not real objects. `Math`, `console`, `pen`, and `loadList` cannot be assigned, passed around, or declared as functions.
+These are compile-time names, not real objects. `Math`, `console`, `pen`, `loadList`, and `loadBin` cannot be assigned, passed around, or declared as functions.
 
 ### `loadList`
 
@@ -185,6 +191,15 @@ console.log(rom[0]);
 ```
 
 Paths are relative to the sprite `.js` file (or the current directory when compiling a string). The argument must be a string literal.
+
+### `loadBin`
+
+Reads a binary file at compile time and stores it as little-endian **u32** list items (a trailing partial word is zero-padded). The path is relative to the sprite `.js` file and must be a string literal. Huge files are streamed into `project.json` so Python does not hold every word in RAM.
+
+```javascript
+let bios = loadBin("bios.bin");
+console.log(bios[0]);
+```
 
 ### `console.log`
 
@@ -271,7 +286,7 @@ Explicit compile errors (not a complete list of every JS feature):
 
 - Object literals `{ a: 1 }`, `new`, `class`, `this`, `super`
 - Property access other than `console.log`, `Math.*`, `pen.*`, `array.length` / `array.push`
-- `import` / `export` (each `.js` file is a sprite, not an ES module; use `loadList("file.txt")` for list data)
+- `import` / `export` (each `.js` file is a sprite, not an ES module; use `loadList("file.txt")` or `loadBin("file.bin")` for list data)
 - `async` / `await`, Promises
 - `try` / `catch` / `throw`
 - `break` / `continue` in loops (switch `break` is supported)
@@ -303,3 +318,16 @@ Scratch has no returning reporters for custom blocks, which is why functions use
 - [`examples/js/space_invaders`](../examples/js/space_invaders) — CHIP-8 emulator with Space Invaders ROM hardcoded
 - [`examples/js/nes`](../examples/js/nes) — NROM NES emulator (6502 + PPU, stub APU). Bundled ROM is nestest; swap games with `python rom_to_txt.py game.nes`
 - [`examples/js/engine3d`](../examples/js/engine3d) — textured scanline 3D engine (cobblestone plaza demo). WASD move, arrows look.
+- [`examples/js/ps1`](../examples/js/ps1) — PlayStation 1 emulator (GT2 Arcade). TurboWarp; huge `.sb3` when the disc is baked.
+
+## Test-running JavaScript
+
+```bash
+python -m js2scratch.run examples/js/pen
+python -m js2scratch.run examples/js/engine3d
+python -m js2scratch.run examples/js/ps1
+```
+
+Opens a 480×360 stage in the browser and runs sprite `.js` files with the same builtins the compiler accepts. Green flag starts (and auto-starts once); Stop terminates workers. `showVariable("fps")` draws a monitor if that name is a top-level `var` (the runner rewrites `let`/`const` to `var` for this).
+
+This is for finding bugs in the **source**. Native JS bitwise ops, faster loops, and inexact pen HSV are expected differences from Scratch / TurboWarp.

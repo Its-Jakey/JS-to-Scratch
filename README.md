@@ -8,6 +8,8 @@ This is a real compiler: source is parsed as JavaScript, then lowered into Scrat
 
 ```bash
 pip install -e .
+python -m js2scratch.run examples/js/hello_world
+python -m js2scratch.run examples/js/pen
 python -m js2scratch examples/js/hello_world -o hello_world.sb3
 python -m js2scratch examples/js/pen -o pen.sb3
 python -m js2scratch examples/js/engine3d -o engine3d.sb3
@@ -34,6 +36,8 @@ project.save("hello.sb3")
 project = compile_project("examples/js/pen")
 project.save("pen.sb3")
 ```
+
+`python -m js2scratch.run` opens a local browser stage that executes the same `.js` files with Scratch-like globals (`pen`, `wait`, `keyPressed`, degree `Math.sin`, `loadList` / `loadBin`). Use that to tell source bugs from compiler bugs before you build an `.sb3`.
 
 Open the `.sb3` in the [Scratch editor](https://scratch.mit.edu/projects/editor/) (**File → Load from your computer**).
 
@@ -142,6 +146,9 @@ The sprite must **move** after `pen.down()` or nothing visible is drawn.
 - [`examples/js/space_invaders`](examples/js/space_invaders) — CHIP-8 emulator with Space Invaders ROM
 - [`examples/js/nes`](examples/js/nes) — NROM NES emulator (6502 + PPU). Bundled ROM is nestest; swap games with `python rom_to_txt.py game.nes`
 - [`examples/js/engine3d`](examples/js/engine3d) — textured scanline 3D plaza. WASD move, arrows look.
+- [`examples/js/ps1`](examples/js/ps1) — PlayStation 1 emulator (GT2 Arcade). TurboWarp; huge `.sb3` when the disc is baked. Folder is `ps1` because Windows cannot distinguish `psx` from the existing `PSX` tree.
+
+Try a project in the browser first with `python -m js2scratch.run examples/js/pen` (same layout as compile).
 
 ---
 

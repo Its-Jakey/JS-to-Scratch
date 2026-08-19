@@ -9,6 +9,7 @@ from js2scratch.ast import (
     Block,
     Break,
     Call,
+    Conditional,
     DoWhile,
     ExpressionStmt,
     For,
@@ -318,7 +319,7 @@ class Parser:
         return self._assignment()
 
     def _assignment(self) -> Node:
-        expr = self._or()
+        expr = self._conditional()
         if self._check(*ASSIGN_OPS):
             op_tok = self._advance()
             if not isinstance(expr, (Identifier, Index)):
@@ -327,6 +328,24 @@ class Parser:
                 raise self._error("compound assignment to array elements is not supported", op_tok)
             value = self._assignment()
             return Assign(op=op_tok.type, left=expr, right=value, **self._loc(op_tok))
+        return expr
+
+    def _conditional(self) -> Node:
+        expr = self._or()
+        if self._match("?"):
+            if self._check("."):
+                raise self._error("optional chaining is not supported")
+            consequent = self._assignment()
+            self._expect(":")
+            alternate = self._conditional()
+            return Conditional(
+                test=expr,
+                consequent=consequent,
+                alternate=alternate,
+                line=expr.line,
+                column=expr.column,
+            )
+        return expr
         return expr
 
     def _or(self) -> Node:
@@ -426,8 +445,6 @@ class Parser:
             op = self._advance()
             arg = self._unary()
             return Unary(op=op.type, argument=arg, prefix=True, **self._loc(op))
-        if self._check("?"):
-            raise self._error("ternary expressions are not supported")
         return self._postfix()
 
     def _postfix(self) -> Node:
@@ -460,8 +477,6 @@ class Parser:
                     raise self._error("invalid increment/decrement target", op)
                 expr = Update(op=op.type, argument=expr, prefix=False, **self._loc(op))
                 continue
-            if self._check("?"):
-                raise self._error("ternary expressions / optional chaining are not supported")
             break
         return expr
 

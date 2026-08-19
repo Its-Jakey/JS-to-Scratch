@@ -998,3 +998,44 @@ def test_nes_rom_txt_matches_ines() -> None:
     assert raw[:4] == b"NES\x1a"
     assert [int(line) for line in lines] == list(raw)
 
+
+def test_ternary_lowers_to_if_else() -> None:
+    source = """
+    function pick(x) {
+      return x > 0 ? 1 : 0;
+    }
+    console.log(pick(2));
+    """
+    project = compile_js(source, sprite="Cat")
+    blocks = _sprite_blocks(project)
+    assert _by_opcode(blocks, "control_if_else")
+
+
+def test_load_bin_packs_little_endian_u32(tmp_path: Path) -> None:
+    blob = tmp_path / "words.bin"
+    blob.write_bytes(bytes([0x44, 0x33, 0x22, 0x11, 0x78, 0x56, 0x34, 0x12, 0xFF]))
+    source = tmp_path / "Cat.js"
+    source.write_text('let words = loadBin("words.bin");\nconsole.log(words[0], words.length);\n', encoding="utf-8")
+    project = compile_js(source.read_text(encoding="utf-8"), sprite="Cat", filename=str(source))
+    sprite = _sprite(project)
+    words = _list_named(sprite, "words")
+    assert words is not None
+    from scratch3.refs import BinaryU32Source, iter_u32_le
+
+    assert isinstance(words, BinaryU32Source)
+    packed = list(iter_u32_le(words.path))
+    assert packed == [0x11223344, 0x12345678, 0x000000FF]
+
+    out = tmp_path / "out.sb3"
+    project.save(out)
+    with zipfile.ZipFile(out) as archive:
+        data = json.loads(archive.read("project.json"))
+    cat = next(target for target in data["targets"] if not target["isStage"])
+    baked = None
+    for entry in cat["lists"].values():
+        if entry[0] == "words":
+            baked = entry[1]
+            break
+    assert baked == [0x11223344, 0x12345678, 0x000000FF]
+
+

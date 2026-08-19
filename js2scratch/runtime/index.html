@@ -1,0 +1,128 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>js2scratch runner</title>
+  <style>
+    :root {
+      --bg: #4d97ff;
+      --panel: #e9f1fc;
+      --stage-bg: #ffffff;
+      --text: #1e2a3a;
+    }
+    * { box-sizing: border-box; }
+    html, body {
+      margin: 0;
+      height: 100%;
+      font-family: "Helvetica Neue", Helvetica, Arial, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+    }
+    header {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 10px 16px;
+      background: #4280d7;
+      color: #fff;
+    }
+    header h1 {
+      font-size: 16px;
+      font-weight: 600;
+      margin: 0;
+      flex: 1;
+    }
+    button {
+      border: 0;
+      border-radius: 6px;
+      padding: 6px 12px;
+      font-size: 14px;
+      cursor: pointer;
+    }
+    #flag { background: #4cbf56; color: #fff; }
+    #stop { background: #ff6680; color: #fff; }
+    button:disabled { opacity: 0.5; cursor: default; }
+    main {
+      display: flex;
+      gap: 16px;
+      padding: 16px;
+      align-items: flex-start;
+    }
+    #stage-wrap {
+      position: relative;
+      width: 480px;
+      height: 360px;
+      background: var(--stage-bg);
+      box-shadow: 0 4px 16px rgba(0,0,0,0.2);
+      overflow: hidden;
+      flex: 0 0 480px;
+    }
+    #stage-wrap canvas {
+      position: absolute;
+      left: 0;
+      top: 0;
+      width: 480px;
+      height: 360px;
+    }
+    #costume-layer { pointer-events: none; }
+    #say {
+      position: absolute;
+      left: 50%;
+      bottom: 48px;
+      transform: translateX(-50%);
+      background: #fff;
+      border: 2px solid #d0d0d0;
+      border-radius: 16px;
+      padding: 8px 14px;
+      max-width: 280px;
+      display: none;
+      font-size: 14px;
+      pointer-events: none;
+    }
+    #monitors {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      min-width: 180px;
+    }
+    .monitor {
+      background: #ff8c1a;
+      color: #fff;
+      border-radius: 6px;
+      padding: 6px 10px;
+      font-variant-numeric: tabular-nums;
+    }
+    .monitor .name { opacity: 0.85; font-size: 12px; }
+    .monitor .value { font-weight: 600; }
+    #log {
+      margin: 0 16px 16px;
+      background: var(--panel);
+      border-radius: 8px;
+      padding: 10px 12px;
+      font-family: ui-monospace, Consolas, monospace;
+      font-size: 12px;
+      max-height: 160px;
+      overflow: auto;
+      white-space: pre-wrap;
+    }
+    #error { color: #b00020; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1 id="title">js2scratch runner</h1>
+    <button type="button" id="flag">Green flag</button>
+    <button type="button" id="stop" disabled>Stop</button>
+  </header>
+  <main>
+    <div id="stage-wrap">
+      <canvas id="costume-layer" width="480" height="360"></canvas>
+      <div id="say"></div>
+    </div>
+    <div id="monitors"></div>
+  </main>
+  <pre id="log"></pre>
+  <script src="/runtime/keys.js"></script>
+  <script src="/runtime/host.js"></script>
+</body>
+</html>
