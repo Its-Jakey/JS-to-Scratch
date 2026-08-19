@@ -29,6 +29,8 @@
   var keysSAB = new SharedArrayBuffer(JS2S_KEY_NAMES.length * 4);
   var keysArr = new Int32Array(keysSAB);
   var anyIndex = JS2S_KEY_INDEX["any"];
+  var mouseSAB = new SharedArrayBuffer(12);
+  var mouseArr = new Int32Array(mouseSAB);
 
   function log(line, isError) {
     if (isError) {
@@ -64,8 +66,38 @@
     if (!name) return;
     setKey(name, false);
   });
+  function setMouseFromEvent(event, down) {
+    var rect = stageWrap.getBoundingClientRect();
+    var x = 0;
+    var y = 0;
+    if (rect.width > 0 && rect.height > 0) {
+      x = ((event.clientX - rect.left) / rect.width) * STAGE_W - STAGE_W / 2;
+      y = STAGE_H / 2 - ((event.clientY - rect.top) / rect.height) * STAGE_H;
+    }
+    Atomics.store(mouseArr, 0, Math.round(x));
+    Atomics.store(mouseArr, 1, Math.round(y));
+    if (down !== undefined) Atomics.store(mouseArr, 2, down ? 1 : 0);
+  }
+
+  stageWrap.addEventListener("mousemove", function (event) {
+    setMouseFromEvent(event);
+  });
+  stageWrap.addEventListener("mousedown", function (event) {
+    event.preventDefault();
+    setMouseFromEvent(event, true);
+  });
+  stageWrap.addEventListener("mouseup", function (event) {
+    setMouseFromEvent(event, false);
+  });
+  stageWrap.addEventListener("mouseleave", function () {
+    Atomics.store(mouseArr, 2, 0);
+  });
+  window.addEventListener("mouseup", function () {
+    Atomics.store(mouseArr, 2, 0);
+  });
   window.addEventListener("blur", function () {
     for (var i = 0; i < keysArr.length; i++) Atomics.store(keysArr, i, 0);
+    Atomics.store(mouseArr, 2, 0);
   });
 
   function drawCostumes() {
@@ -216,6 +248,7 @@
         scriptUrl: sprite.script,
         projectBase: "/project/",
         keys: keysSAB,
+        mouse: mouseSAB,
         sync: syncSAB,
         x: sprite.x || 0,
         y: sprite.y || 0,

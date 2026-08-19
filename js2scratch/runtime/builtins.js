@@ -20,10 +20,12 @@ var JS2S = (function () {
   var pixels = null;
   var pixels32 = null;
   var keysArr = null;
+  var mouseArr = null;
   var syncArr = null;
   var projectBase = "/project/";
   var shownVars = [];
   var timerStart = 0;
+  var cloudVars = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
 
   var x = 0;
   var y = 0;
@@ -222,6 +224,9 @@ var JS2S = (function () {
   }
 
   function syncGet(path, type) {
+    if (typeof JS2S_readFile === "function") {
+      return JS2S_readFile(path, type);
+    }
     var xhr = new XMLHttpRequest();
     xhr.open("GET", resolveUrl(path), false);
     xhr.responseType = type;
@@ -336,6 +341,10 @@ var JS2S = (function () {
   function wait(seconds) {
     flushMonitors();
     present();
+    if (typeof JS2S_afterWait === "function") {
+      JS2S_afterWait(seconds);
+      return;
+    }
     var ms = Math.max(0, Number(seconds) * 1000);
     if (!syncArr) return;
     Atomics.store(syncArr, 0, 0);
@@ -363,6 +372,21 @@ var JS2S = (function () {
     return Atomics.load(keysArr, idx) !== 0;
   }
 
+  function mouseX() {
+    if (!mouseArr) return 0;
+    return Atomics.load(mouseArr, 0);
+  }
+
+  function mouseY() {
+    if (!mouseArr) return 0;
+    return Atomics.load(mouseArr, 1);
+  }
+
+  function mouseDown() {
+    if (!mouseArr) return false;
+    return Atomics.load(mouseArr, 2) !== 0;
+  }
+
   function timer() {
     return (performance.now() - timerStart) / 1000;
   }
@@ -375,6 +399,24 @@ var JS2S = (function () {
     name = String(name);
     if (shownVars.indexOf(name) < 0) shownVars.push(name);
     flushMonitors();
+  }
+
+  function getCloudVariable(idx) {
+    var i;
+    for (i = 0; i < cloudVars.length; i++) {
+      if (idx == i) return cloudVars[i];
+    }
+    return 0;
+  }
+
+  function setCloudVariable(idx, value) {
+    var i;
+    for (i = 0; i < cloudVars.length; i++) {
+      if (idx == i) {
+        cloudVars[i] = value;
+        return;
+      }
+    }
   }
 
   function flushMonitors() {
@@ -452,12 +494,14 @@ var JS2S = (function () {
   function install(data) {
     projectBase = data.projectBase || "/project/";
     keysArr = new Int32Array(data.keys);
+    mouseArr = data.mouse ? new Int32Array(data.mouse) : null;
     syncArr = new Int32Array(data.sync);
     x = data.x || 0;
     y = data.y || 0;
     direction = data.direction == null ? 90 : data.direction;
     visible = data.visible !== false;
     timerStart = performance.now();
+    cloudVars = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
     wrapMath();
     packColor();
     pixels = new Uint8ClampedArray(STAGE_W * STAGE_H * 4);
@@ -481,9 +525,14 @@ var JS2S = (function () {
     g.yPosition = yPosition;
     g.direction = directionReporter;
     g.keyPressed = keyPressed;
+    g.mouseX = mouseX;
+    g.mouseY = mouseY;
+    g.mouseDown = mouseDown;
     g.timer = timer;
     g.resetTimer = resetTimer;
     g.showVariable = showVariable;
+    g.getCloudVariable = getCloudVariable;
+    g.setCloudVariable = setCloudVariable;
     g.loadList = loadList;
     g.loadBin = loadBin;
     g.pen = pen;

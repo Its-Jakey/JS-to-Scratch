@@ -37,13 +37,13 @@ project = compile_project("examples/js/pen")
 project.save("pen.sb3")
 ```
 
-`python -m js2scratch.run` opens a local browser stage that executes the same `.js` files with Scratch-like globals (`pen`, `wait`, `keyPressed`, degree `Math.sin`, `loadList` / `loadBin`). Use that to tell source bugs from compiler bugs before you build an `.sb3`.
+`python -m js2scratch.run <file-or-folder>` opens a local browser stage. `python -m js2scratch.run <path> --headless --frames 3` runs the same scripts in Node and writes `.js2s-debug/summary.json`, `run.log`, and `last-frame.png` so you can inspect a run without the GUI.
 
 Open the `.sb3` in the [Scratch editor](https://scratch.mit.edu/projects/editor/) (**File → Load from your computer**).
 
 Requires Python 3.10+. No third-party runtime dependencies. Allowed programs are valid JavaScript. Unsupported JS is a **compile error with file/line/column**, not silent wrong code.
 
-Language reference: [`js2scratch/README.md`](js2scratch/README.md).
+Language reference: [`js2scratch/README.md`](js2scratch/README.md). Runner and headless debugger: [`js2scratch/RUN.md`](js2scratch/RUN.md).
 
 ---
 
@@ -131,8 +131,9 @@ These are compile-time names, not real objects. `Math`, `console`, `pen`, and `l
 | `pen.setColor("#4C97FF")` / `pen.setSize(3)` | pen color / size |
 | `move(steps)` / `turnRight(deg)` / `goTo(x, y)` | motion |
 | `hide()` / `show()` / `wait(seconds)` | looks / control |
-| `keyPressed("space")` / `timer()` / `resetTimer()` | sensing |
+| `keyPressed("space")` / `mouseX()` / `mouseY()` / `mouseDown()` / `timer()` / `resetTimer()` | sensing |
 | `showVariable("fps")` | show variable monitor |
+| `getCloudVariable(i)` / `setCloudVariable(i, value)` | 10 stage cloud variables (`☁ cloud0`–`☁ cloud9`); constant indexes compile to a direct get/set |
 
 The sprite must **move** after `pen.down()` or nothing visible is drawn.
 
@@ -148,7 +149,12 @@ The sprite must **move** after `pen.down()` or nothing visible is drawn.
 - [`examples/js/engine3d`](examples/js/engine3d) — textured scanline 3D plaza. WASD move, arrows look.
 - [`examples/js/ps1`](examples/js/ps1) — PlayStation 1 emulator (GT2 Arcade). TurboWarp; huge `.sb3` when the disc is baked. Folder is `ps1` because Windows cannot distinguish `psx` from the existing `PSX` tree.
 
-Try a project in the browser first with `python -m js2scratch.run examples/js/pen` (same layout as compile).
+Try a project in the browser or dump a headless run (see [`js2scratch/RUN.md`](js2scratch/RUN.md)):
+
+```bash
+python -m js2scratch.run examples/js/pen
+python -m js2scratch.run examples/js/engine3d --headless --frames 2 --timeout 120
+```
 
 ---
 

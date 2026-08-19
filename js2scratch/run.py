@@ -5,8 +5,12 @@ from __future__ import annotations
 import argparse
 import json
 import mimetypes
+import os
+import shutil
+import subprocess
 import sys
 import threading
+import time
 import webbrowser
 from functools import partial
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -15,6 +19,7 @@ from typing import Any
 from urllib.parse import unquote, urlparse
 
 from js2scratch.errors import CompileError
+from js2scratch.png import write_png_rgba
 from js2scratch.project_loader import SPRITE_KEYS
 from js2scratch.rewrite import rewrite_let_const_to_var
 
@@ -218,6 +223,102 @@ def make_server(project: dict[str, Any], host: str = "127.0.0.1", port: int = 0)
     return ThreadingHTTPServer((host, port), handler)
 
 
+def default_debug_dir(source: Path) -> Path:
+    root = source if source.is_dir() else source.parent
+    return root / ".js2s-debug"
+
+
+def find_node() -> str | None:
+    found = shutil.which("node")
+    if found:
+        return found
+    for base in (os.environ.get("ProgramFiles"), os.environ.get("ProgramFiles(x86)"), r"C:\Program Files"):
+        if not base:
+            continue
+        candidate = Path(base) / "nodejs" / "node.exe"
+        if candidate.is_file():
+            return str(candidate)
+    return None
+
+
+def run_headless(
+    project: dict[str, Any],
+    out_dir: Path,
+    *,
+    frames: int = 3,
+    timeout: float = 60.0,
+    keys: list[str] | None = None,
+) -> int:
+    """Run sprite scripts in Node, dump log/summary/PNG for agent debugging."""
+    node = find_node()
+    if not node:
+        print("headless runner requires Node.js on PATH", file=sys.stderr)
+        return 2
+
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    root: Path = project["root"]
+    status = 0
+    started = time.time()
+
+    for sprite in project["sprites"]:
+        source_path = root / sprite["file"]
+        rewritten = rewrite_let_const_to_var(
+            source_path.read_text(encoding="utf-8"),
+            filename=str(source_path),
+        )
+        script_copy = out_dir / f"{sprite['name']}.rewritten.js"
+        script_copy.write_text(rewritten, encoding="utf-8")
+        sprite_out = out_dir if len(project["sprites"]) == 1 else out_dir / sprite["name"]
+        sprite_out.mkdir(parents=True, exist_ok=True)
+        cmd = [
+            node,
+            str(RUNTIME_DIR / "headless.js"),
+            "--root",
+            str(root),
+            "--script",
+            str(script_copy),
+            "--out",
+            str(sprite_out),
+            "--runtime",
+            str(RUNTIME_DIR),
+            "--frames",
+            str(frames),
+            "--timeout-ms",
+            str(int(timeout * 1000)),
+        ]
+        if keys:
+            cmd.extend(["--keys", ",".join(keys)])
+        proc = subprocess.run(cmd, capture_output=True, text=True)
+        if proc.stdout:
+            (sprite_out / "stdout.txt").write_text(proc.stdout, encoding="utf-8")
+        if proc.stderr:
+            (sprite_out / "stderr.txt").write_text(proc.stderr, encoding="utf-8")
+        rgba_path = sprite_out / "last-frame.rgba"
+        meta_path = sprite_out / "last-frame.json"
+        if rgba_path.is_file() and meta_path.is_file():
+            meta = json.loads(meta_path.read_text(encoding="utf-8"))
+            write_png_rgba(
+                sprite_out / "last-frame.png",
+                int(meta["width"]),
+                int(meta["height"]),
+                rgba_path.read_bytes(),
+            )
+        if proc.returncode != 0:
+            status = proc.returncode
+            err = (sprite_out / "error.txt").read_text(encoding="utf-8") if (sprite_out / "error.txt").is_file() else proc.stderr
+            print(err or f"headless {sprite['name']} exited {proc.returncode}", file=sys.stderr)
+
+    elapsed = time.time() - started
+    print(f"js2scratch headless: {project['name']}")
+    print(f"  frames={frames}  elapsed={elapsed:.2f}s  out={out_dir}")
+    summary = out_dir / "summary.json"
+    if not summary.is_file() and len(project["sprites"]) == 1:
+        pass
+    print(f"  read {out_dir / 'summary.json'}, {out_dir / 'run.log'}, {out_dir / 'last-frame.png'}")
+    return 0 if status == 0 else 1
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="js2scratch.run",
@@ -227,6 +328,33 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--host", default="127.0.0.1", help="Bind address (default: 127.0.0.1)")
     parser.add_argument("--port", type=int, default=0, help="Port (default: pick a free port)")
     parser.add_argument("--no-browser", action="store_true", help="Do not open a browser")
+    parser.add_argument(
+        "--headless",
+        action="store_true",
+        help="Run in Node (no browser): dump summary.json, run.log, last-frame.png, then exit",
+    )
+    parser.add_argument(
+        "--frames",
+        type=int,
+        default=3,
+        help="Headless: stop after this many wait() yields (default: 3)",
+    )
+    parser.add_argument(
+        "--timeout",
+        type=float,
+        default=60.0,
+        help="Headless: kill after this many seconds (default: 60)",
+    )
+    parser.add_argument(
+        "--debug-dir",
+        type=Path,
+        help="Artifact directory (default: <project>/.js2s-debug)",
+    )
+    parser.add_argument(
+        "--keys",
+        default="",
+        help="Headless: comma-separated Scratch key names held down (e.g. w,left arrow)",
+    )
     args = parser.parse_args(argv)
 
     try:
@@ -234,6 +362,11 @@ def main(argv: list[str] | None = None) -> int:
     except CompileError as exc:
         print(exc, file=sys.stderr)
         return 1
+
+    if args.headless:
+        out = args.debug_dir or default_debug_dir(Path(args.source))
+        keys = [k.strip() for k in args.keys.split(",") if k.strip()]
+        return run_headless(project, out, frames=args.frames, timeout=args.timeout, keys=keys)
 
     server = make_server(project, host=args.host, port=args.port)
     host, port = server.server_address[:2]

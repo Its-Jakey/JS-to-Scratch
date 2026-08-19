@@ -2151,6 +2151,16 @@ function plotPixel(x, y, color) {
   pen.up();
 }
 
+function vramSampleNZ() {
+  let n = 0;
+  let i = 0;
+  while (i < vram.length) {
+    if (vram[i]) n++;
+    i += 128;
+  }
+  return n;
+}
+
 function blit() {
   if (gpu_gpustat & 8388608) return;
   updateDisplaySize();
@@ -2267,7 +2277,7 @@ function boot() {
   mc2_ram_size = 2952;
   cdrom_pending_lba = 150;
   cdrom_lba = 150;
-  STEPS_PER_SLICE = 1000;
+  STEPS_PER_SLICE = 200000;
   psx_init();
   // psx_cdrom_open();
   hide();
@@ -2276,6 +2286,7 @@ function boot() {
   pen.setSize(pixelStep);
   showVariable("fps");
   resetTimer();
+  console.log("boot biosWords", bios.length, "bios0", bios[0], "pc", cpu_pc, "next", cpu_next_pc, "sr", cpu_cop0_r[12]);
 }
 
 function runSlice() {
@@ -2300,6 +2311,7 @@ while (true) {
     fpsFrames = 0;
     resetTimer();
   }
+  console.log("slice pc", cpu_pc, "cyc", cpu_total_cycles, "line", gpu_line, "stat", u32(gpu_gpustat), "dispOff", gpu_gpustat & 8388608, "need", needRender, "vramNZ", vramSampleNZ(), "mode", gpu_display_mode, "r31", cpu_r[31]);
   wait(0);
 }
 '''

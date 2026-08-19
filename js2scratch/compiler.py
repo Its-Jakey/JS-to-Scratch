@@ -87,10 +87,12 @@ from js2scratch.bitwise import (
 )
 from js2scratch.builtins import (
     ALLOWED_MATH,
+    CLOUD_VAR_COUNT,
     DRAW_BUILTINS,
     MATH_UNARY,
     PEN_METHODS,
     RESERVED_BUILTINS,
+    cloud_var_name,
 )
 from js2scratch.errors import CompileError
 from js2scratch.optimize import optimize
@@ -161,6 +163,9 @@ class Compiler:
         self.sw_ret: Variable | None = None
         self.sw_ret_needed = False
         self.return_is_tail = False
+        self.cloud_vars: list[Variable] | None = None
+        self.cloud_get: CustomBlock | None = None
+        self.cloud_set: CustomBlock | None = None
 
     def compile(self, program: Program) -> None:
         program = optimize(program)
@@ -520,6 +525,11 @@ class Compiler:
         for custom, ret in self.bw_ops.values():
             if proto is custom:
                 return {id(ret): ret}
+        if self.cloud_set is not None and proto is self.cloud_set:
+            return {}
+        if self.cloud_get is not None and proto is self.cloud_get:
+            ret = self._ensure_return()
+            return {id(ret): ret}
         if self.ret is not None:
             return {id(self.ret): self.ret}
         return {}
@@ -1523,6 +1533,10 @@ class Compiler:
             return self._load_bin(node)
         if callee.name == "showVariable":
             return self._show_variable(node)
+        if callee.name == "getCloudVariable":
+            return self._get_cloud_variable(node, used)
+        if callee.name == "setCloudVariable":
+            return self._set_cloud_variable(node)
         if callee.name in DRAW_BUILTINS and callee.name not in self.functions:
             return self._draw_builtin(node, callee.name)
         if callee.name not in self.functions:
@@ -1650,6 +1664,94 @@ class Compiler:
         blocks.append(AddToList(item.value, obj.value))
         if used:
             return Lowered(blocks, LengthOfList(obj.value), NUMBER)
+        return Lowered(blocks, "", VOID)
+
+    def _stage(self):
+        return self.target.project.stage
+
+    def _ensure_cloud_vars(self) -> list[Variable]:
+        if self.cloud_vars is not None:
+            return self.cloud_vars
+        stage = self._stage()
+        self.cloud_vars = [
+            stage.variable(cloud_var_name(i), 0, cloud=True) for i in range(CLOUD_VAR_COUNT)
+        ]
+        return self.cloud_vars
+
+    def _cloud_const_index(self, lowered: Lowered, node: Node) -> int | None:
+        constant = self._numeric_const(lowered)
+        if constant is None:
+            return None
+        if int(constant) != constant:
+            raise self._error(
+                f"cloud variable index must be an integer 0-{CLOUD_VAR_COUNT - 1}, got {constant}",
+                node,
+            )
+        idx = int(constant)
+        if idx < 0 or idx >= CLOUD_VAR_COUNT:
+            raise self._error(
+                f"cloud variable index {idx} is out of range (0-{CLOUD_VAR_COUNT - 1})",
+                node,
+            )
+        return idx
+
+    def _ensure_cloud_get(self) -> tuple[CustomBlock, Variable]:
+        if self.cloud_get is not None:
+            return self.cloud_get, self._ensure_return()
+        clouds = self._ensure_cloud_vars()
+        ret = self._ensure_return()
+        custom = CustomBlock("getCloudVariable", ["idx"], warp=True)
+        idx = custom["idx"]
+        body: list[Any] = [SetVariable(ret, 0)]
+        for i, var in enumerate(clouds):
+            body.append(If(Equals(idx, i), then=[SetVariable(ret, var)]))
+        self.target.add_script(Define(custom, *body))
+        self.cloud_get = custom
+        return custom, ret
+
+    def _ensure_cloud_set(self) -> CustomBlock:
+        if self.cloud_set is not None:
+            return self.cloud_set
+        clouds = self._ensure_cloud_vars()
+        custom = CustomBlock("setCloudVariable", ["idx", "value"], warp=True)
+        idx = custom["idx"]
+        value = custom["value"]
+        body = [
+            If(Equals(idx, i), then=[SetVariable(var, value)])
+            for i, var in enumerate(clouds)
+        ]
+        self.target.add_script(Define(custom, *body))
+        self.cloud_set = custom
+        return custom
+
+    def _get_cloud_variable(self, node: Call, used: bool) -> Lowered:
+        if len(node.arguments) != 1:
+            raise self._error("getCloudVariable() takes 1 argument", node)
+        idx = self._expr(node.arguments[0])
+        const = self._cloud_const_index(idx, node)
+        clouds = self._ensure_cloud_vars()
+        if const is not None:
+            return Lowered(idx.blocks, clouds[const], NUMBER)
+        custom, ret = self._ensure_cloud_get()
+        blocks = [*idx.blocks, custom(idx.value)]
+        if used:
+            return Lowered(blocks, ret, NUMBER)
+        return Lowered(blocks, "", VOID)
+
+    def _set_cloud_variable(self, node: Call) -> Lowered:
+        if len(node.arguments) != 2:
+            raise self._error("setCloudVariable() takes 2 arguments", node)
+        idx = self._expr(node.arguments[0])
+        value = self._expr(node.arguments[1])
+        const = self._cloud_const_index(idx, node)
+        clouds = self._ensure_cloud_vars()
+        blocks, sequenced = self._seq(idx, value)
+        idx, value = sequenced
+        if const is not None:
+            blocks.append(SetVariable(clouds[const], value.value))
+            return Lowered(blocks, "", VOID)
+        custom = self._ensure_cloud_set()
+        blocks.append(custom(idx.value, value.value))
         return Lowered(blocks, "", VOID)
 
     def _show_variable(self, node: Call) -> Lowered:

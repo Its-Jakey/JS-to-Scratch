@@ -14,6 +14,9 @@ htmlcov/
 .hypothesis/
 .cache/
 
+# Headless runner dumps (agent debugging)
+.js2s-debug/
+
 # Virtual environments
 .venv/
 venv/

@@ -211,6 +211,20 @@ def test_variable_and_broadcast() -> None:
     assert broadcast["inputs"]["BROADCAST_INPUT"][1][1] == "ping"
 
 
+def test_cloud_variable_on_stage() -> None:
+    project = Project()
+    cloud = project.variable("score", 0, cloud=True)
+    cat = project.add_sprite("Cat")
+    cat.add_script(WhenFlagClicked(SetVariable(cloud, 1)))
+    data = project.to_dict()
+    stage = data["targets"][0]
+    assert cloud.name == "☁ score"
+    assert stage["variables"][cloud.id] == ["☁ score", 0, True]
+    assert cloud.id not in data["targets"][1]["variables"]
+    with pytest.raises(ValueError, match="cloud variables"):
+        cat.variable("other", 0, cloud=True)
+
+
 def test_list_from_file(tmp_path: Path) -> None:
     path = tmp_path / "items.txt"
     path.write_text("sword\n42\n3.5\n\nlast\n", encoding="utf-8")

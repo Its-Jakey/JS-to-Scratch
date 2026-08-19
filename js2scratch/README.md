@@ -28,6 +28,8 @@ project.save("pen.sb3")
 
 The runner is not a Scratch VM (no clones, broadcasts, or TurboWarp warp). Huge `loadBin` files (for example a full PS1 disc) may run out of memory in the browser; BIOS + a stub disc is enough to iterate. Do not open the HTML as a file — the server sends COOP/COEP headers so `SharedArrayBuffer` can implement blocking `wait`.
 
+Browser vs headless debugger, flags, and dump files: [`RUN.md`](RUN.md).
+
 Open the `.sb3` in the [Scratch editor](https://scratch.mit.edu/projects/editor/) (**File → Load from your computer**).
 
 Allowed programs are valid JavaScript. Unsupported JS is a **compile error with file/line/column**, not silent wrong code.
@@ -179,7 +181,7 @@ Arrays cannot be function parameters. String `.length` uses the string-length re
 
 ## Builtins
 
-These are compile-time names, not real objects. `Math`, `console`, `pen`, `loadList`, and `loadBin` cannot be assigned, passed around, or declared as functions.
+These are compile-time names, not real objects. `Math`, `console`, `pen`, `loadList`, `loadBin`, `getCloudVariable`, and `setCloudVariable` cannot be assigned, passed around, or declared as functions.
 
 ### `loadList`
 
@@ -268,8 +270,20 @@ The sprite must **move** after `pen.down()` or nothing visible is drawn. Use the
 | `hide()` / `show()` | hide / show the sprite |
 | `wait(seconds)` | wait () seconds (Scratch wait, not `async`) |
 | `keyPressed(name)` | key `name` pressed? (`"space"`, `"left arrow"`, `"a"`, …) |
+| `mouseX()` / `mouseY()` / `mouseDown()` | mouse x, mouse y, mouse down? |
 | `timer()` / `resetTimer()` | timer reporter / reset timer |
 | `showVariable("fps")` | show variable monitor on the stage |
+| `getCloudVariable(i)` / `setCloudVariable(i, value)` | read / write one of 10 stage cloud variables (`☁ cloud0` … `☁ cloud9`) |
+
+A compile-time index (`setCloudVariable(0, n)`, `getCloudVariable(1 + 2)`) becomes a direct get/set of that cloud variable, or a compile error if it is not an integer in `0`–`9`. A runtime index calls a warp custom block of `if`s. The ten cloud variables are created on the Stage only if the project uses these builtins.
+
+```javascript
+setCloudVariable(0, 42);
+console.log(getCloudVariable(0));
+
+let i = 1;
+setCloudVariable(i, n);
+```
 
 `xPosition()` and friends are reporters, so they nest in expressions:
 
@@ -322,12 +336,9 @@ Scratch has no returning reporters for custom blocks, which is why functions use
 
 ## Test-running JavaScript
 
+Browser stage and **headless debugger** (artifacts under `.js2s-debug/`): see [`RUN.md`](RUN.md).
+
 ```bash
 python -m js2scratch.run examples/js/pen
-python -m js2scratch.run examples/js/engine3d
-python -m js2scratch.run examples/js/ps1
+python -m js2scratch.run examples/js/engine3d --headless --frames 2 --timeout 120
 ```
-
-Opens a 480×360 stage in the browser and runs sprite `.js` files with the same builtins the compiler accepts. Green flag starts (and auto-starts once); Stop terminates workers. `showVariable("fps")` draws a monitor if that name is a top-level `var` (the runner rewrites `let`/`const` to `var` for this).
-
-This is for finding bugs in the **source**. Native JS bitwise ops, faster loops, and inexact pen HSV are expected differences from Scratch / TurboWarp.

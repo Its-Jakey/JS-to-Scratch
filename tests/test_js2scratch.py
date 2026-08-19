@@ -37,6 +37,11 @@ def _sprite(project) -> dict:
     return next(target for target in data["targets"] if not target["isStage"])
 
 
+def _stage(project) -> dict:
+    data = project.to_dict()
+    return next(target for target in data["targets"] if target["isStage"])
+
+
 def _sprite_blocks(project) -> dict:
     return _sprite(project)["blocks"]
 
@@ -364,6 +369,22 @@ def test_key_pressed_builtin() -> None:
     project = compile_js(source, sprite="Cat")
     blocks = _sprite_blocks(project)
     assert _by_opcode(blocks, "sensing_keypressed")
+
+
+def test_mouse_builtins() -> None:
+    source = """
+    let x = mouseX();
+    let y = mouseY();
+    let n = 0;
+    if (mouseDown()) {
+      n = 1;
+    }
+    """
+    project = compile_js(source, sprite="Cat")
+    blocks = _sprite_blocks(project)
+    assert _by_opcode(blocks, "sensing_mousex")
+    assert _by_opcode(blocks, "sensing_mousey")
+    assert _by_opcode(blocks, "sensing_mousedown")
 
 
 def test_timer_and_show_variable() -> None:
@@ -1037,5 +1058,95 @@ def test_load_bin_packs_little_endian_u32(tmp_path: Path) -> None:
             baked = entry[1]
             break
     assert baked == [0x11223344, 0x12345678, 0x000000FF]
+
+
+def _cloud_entries(project) -> list[list]:
+    return [entry for entry in _stage(project)["variables"].values() if entry[0].startswith("☁")]
+
+
+def test_cloud_vars_omitted_when_unused() -> None:
+    project = compile_js('console.log("hi");', sprite="Cat")
+    assert _cloud_entries(project) == []
+    codes = _proccodes(_sprite_blocks(project))
+    assert "getCloudVariable %s" not in codes
+    assert "setCloudVariable %s %s" not in codes
+
+
+def test_cloud_const_index_direct_get_set() -> None:
+    source = """
+    setCloudVariable(0, 42);
+    console.log(getCloudVariable(0));
+    setCloudVariable(1 + 2, 7);
+    console.log(getCloudVariable(3));
+    """
+    project = compile_js(source, sprite="Cat")
+    clouds = _cloud_entries(project)
+    assert len(clouds) == 10
+    assert all(entry[2] is True for entry in clouds)
+    names = [entry[0] for entry in clouds]
+    assert names == [f"☁ cloud{i}" for i in range(10)]
+    assert all(name not in _var_names(_sprite(project)) for name in names)
+
+    blocks = _sprite_blocks(project)
+    codes = _proccodes(blocks)
+    assert "getCloudVariable %s" not in codes
+    assert "setCloudVariable %s %s" not in codes
+
+    sets = [
+        node
+        for _, node in _by_opcode(blocks, "data_setvariableto")
+        if node["fields"]["VARIABLE"][0].startswith("☁")
+    ]
+    set_names = [node["fields"]["VARIABLE"][0] for node in sets]
+    assert "☁ cloud0" in set_names
+    assert "☁ cloud3" in set_names
+
+    says = _by_opcode(blocks, "looks_say")
+    assert says
+    message = says[0][1]["inputs"]["MESSAGE"]
+    assert message[1][0] == 12
+    assert message[1][1] == "☁ cloud0"
+
+
+def test_cloud_const_index_out_of_range() -> None:
+    with pytest.raises(CompileError, match="out of range"):
+        compile_js("setCloudVariable(10, 1);")
+    with pytest.raises(CompileError, match="out of range"):
+        compile_js("console.log(getCloudVariable(-1));")
+    with pytest.raises(CompileError, match="out of range"):
+        compile_js("setCloudVariable(5 + 5, 1);")
+    with pytest.raises(CompileError, match="integer"):
+        compile_js("setCloudVariable(1.5, 1);")
+
+
+def test_cloud_dynamic_index_custom_block() -> None:
+    source = """
+    let i = 0;
+    setCloudVariable(i, 5);
+    console.log(getCloudVariable(i));
+    """
+    project = compile_js(source, sprite="Cat")
+    assert len(_cloud_entries(project)) == 10
+    blocks = _sprite_blocks(project)
+    codes = _proccodes(blocks)
+    assert "getCloudVariable %s" in codes
+    assert "setCloudVariable %s %s" in codes
+    assert len(_definition_body_ids(blocks, "getCloudVariable %s")) == 11
+    assert len(_definition_body_ids(blocks, "setCloudVariable %s %s")) == 10
+    assert _by_opcode(blocks, "control_if")
+    calls = _by_opcode(blocks, "procedures_call")
+    procodes = [(block.get("mutation") or {}).get("proccode") for _, block in calls]
+    assert "getCloudVariable %s" in procodes
+    assert "setCloudVariable %s %s" in procodes
+
+
+def test_cloud_reserved_builtin() -> None:
+    with pytest.raises(CompileError, match="reserved builtin"):
+        compile_js("function getCloudVariable(idx) { return idx; }")
+    with pytest.raises(CompileError, match="takes 1 argument"):
+        compile_js("getCloudVariable();")
+    with pytest.raises(CompileError, match="takes 2 argument"):
+        compile_js("setCloudVariable(0);")
+
 
 

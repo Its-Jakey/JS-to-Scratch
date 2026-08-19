@@ -1,0 +1,13 @@
+{
+  "name": "Minecraft",
+  "sprites": {
+    "Cat": {
+      "x": 0,
+      "y": 40,
+      "size": 28,
+      "visible": false,
+      "costume": "texture pack/title/mclogo.png",
+      "costumes": ["texture pack/title/mclogo.png"]
+    }
+  }
+}

@@ -1,0 +1,23 @@
+{
+  "ok": true,
+  "frames": 2,
+  "elapsed_ms": 11396,
+  "logs": [
+    "boot biosWords 131072 bios0 1007157267 pc 3217031168 next 3217031172 sr 277872640",
+    "slice pc 3217042280 op 2693726207 cyc 3032824 line 61 stat 8388608 need 0 r1 4294967182 r2 2684399720 r31 3217059860",
+    "slice pc 3217042288 op 617021439 cyc 7032824 line 36 stat -2139095040 need 0 r1 4294967182 r2 2684399720 r31 3217059860"
+  ],
+  "vars": {
+    "fps": 1
+  },
+  "pose": {
+    "x": 0,
+    "y": 0,
+    "direction": 90,
+    "visible": false
+  },
+  "error": null,
+  "stop": "frames",
+  "width": 480,
+  "height": 360
+}

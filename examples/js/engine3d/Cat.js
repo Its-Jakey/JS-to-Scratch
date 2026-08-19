@@ -2,17 +2,21 @@
 // Green flag: walk a cobblestone plaza with buildings, crates, and a pyramid.
 // Controls: WASD move, arrows look, Q/E or space/shift up/down.
 //
-// Display is 480x360 (native stage, pen size 2). Aimed at TurboWarp.
-// Textures are 128x128. Scratch Math.sin/cos/tan are degrees.
+// Display is 480x360 (native stage). Internal buffer is W x H; each pixel is
+// pixelStep stage units (W * pixelStep should be 480). Aimed at TurboWarp.
+// Textures are TEX x TEX. Scratch Math.sin/cos/tan are degrees.
 
-let W = 480;
-let H = 360;
-let pixelStep = 1;
-let gfxLen = 172800;
-let TEX = 128;
-let uvPerUnit = 32;
-let nearZ = 0.4;
+let W = 240;
+let H = 180;
+let pixelStep = 2;
+let gfxLen = 43200;
+let TEX = 64;
+let uvPerUnit = 16;
+let nearZ = 0.2;
 let fov = 57;
+let playerR = 0.45;
+let bodyDown = 1.5;
+let bodyUp = 0.2;
 
 let T_COBBLE = 0;
 let T_BRICK = 1;
@@ -115,6 +119,13 @@ let spanColor = 0;
 let fps = 0;
 let fpsFrames = 0;
 let fpsStamp = 0;
+
+let clipX = [];
+let clipY = [];
+let clipZ = [];
+let clipU = [];
+let clipV = [];
+let clipCount = 0;
 
 
 function texPush(r, g, b) {
@@ -322,6 +333,26 @@ function genPlaster() {
 
 function genCrate() {
   texOff.push(tr.length);
+  let edge = Math.floor(TEX * 10 / 128);
+  if (edge < 3) {
+    edge = 3;
+  }
+  let brace = Math.floor(TEX * 6 / 128);
+  if (brace < 2) {
+    brace = 2;
+  }
+  let plank = Math.floor(TEX * 28 / 128);
+  if (plank < 8) {
+    plank = 8;
+  }
+  let bolt = Math.floor(TEX * 32 / 128);
+  if (bolt < 8) {
+    bolt = 8;
+  }
+  let hole = Math.floor(TEX * 6 / 128);
+  if (hole < 2) {
+    hole = 2;
+  }
   let y = 0;
   while (y < TEX) {
     let x = 0;
@@ -331,9 +362,9 @@ function genCrate() {
       let r = 158 + grain + wave / 16;
       let g = 108 + grain * 0.7 + wave / 22;
       let b = 54 + grain / 4;
-      if ((y - 10) % 28 < 3) {
-        if (y > 10) {
-          if (y < TEX - 10) {
+      if ((y - edge) % plank < 3) {
+        if (y > edge) {
+          if (y < TEX - edge) {
             r = 96;
             g = 62;
             b = 30;
@@ -342,66 +373,66 @@ function genCrate() {
       }
       let d1 = Math.abs(x - y);
       let d2 = Math.abs(x - (TEX - 1 - y));
-      if (d1 < 6) {
+      if (d1 < brace) {
         r = 72 + grain / 3;
         g = 48 + grain / 4;
         b = 24;
       }
-      if (d2 < 6) {
+      if (d2 < brace) {
         r = 72 + grain / 3;
         g = 48 + grain / 4;
         b = 24;
       }
-      if (x < 10) {
+      if (x < edge) {
         r = 118;
         g = 118;
         b = 124;
       }
-      if (x > TEX - 11) {
+      if (x > TEX - 1 - edge) {
         r = 118;
         g = 118;
         b = 124;
       }
-      if (y < 10) {
+      if (y < edge) {
         r = 118;
         g = 118;
         b = 124;
       }
-      if (y > TEX - 11) {
+      if (y > TEX - 1 - edge) {
         r = 118;
         g = 118;
         b = 124;
       }
-      if (x < 10) {
-        if (y % 32 < 6) {
-          if (y % 32 > 1) {
+      if (x < edge) {
+        if (y % bolt < hole) {
+          if (y % bolt > 1) {
             r = 72;
             g = 74;
             b = 80;
           }
         }
       }
-      if (x > TEX - 11) {
-        if (y % 32 < 6) {
-          if (y % 32 > 1) {
+      if (x > TEX - 1 - edge) {
+        if (y % bolt < hole) {
+          if (y % bolt > 1) {
             r = 72;
             g = 74;
             b = 80;
           }
         }
       }
-      if (y < 10) {
-        if (x % 32 < 6) {
-          if (x % 32 > 1) {
+      if (y < edge) {
+        if (x % bolt < hole) {
+          if (x % bolt > 1) {
             r = 72;
             g = 74;
             b = 80;
           }
         }
       }
-      if (y > TEX - 11) {
-        if (x % 32 < 6) {
-          if (x % 32 > 1) {
+      if (y > TEX - 1 - edge) {
+        if (x % bolt < hole) {
+          if (x % bolt > 1) {
             r = 72;
             g = 74;
             b = 80;
@@ -595,11 +626,25 @@ function addBox(x, y, z, w, h, d, tWall, tTop) {
   let x1 = x + w;
   let y1 = y + h;
   let z1 = z + d;
-  addQuadUV(x0, y0, z1, x1, y0, z1, x1, y1, z1, x0, y1, z1, tWall, w * uvPerUnit, h * uvPerUnit);
-  addQuadUV(x1, y0, z0, x0, y0, z0, x0, y1, z0, x1, y1, z0, tWall, w * uvPerUnit, h * uvPerUnit);
-  addQuadUV(x1, y0, z1, x1, y0, z0, x1, y1, z0, x1, y1, z1, tWall, d * uvPerUnit, h * uvPerUnit);
-  addQuadUV(x0, y0, z0, x0, y0, z1, x0, y1, z1, x0, y1, z0, tWall, d * uvPerUnit, h * uvPerUnit);
-  addQuadUV(x0, y1, z1, x1, y1, z1, x1, y1, z0, x0, y1, z0, tTop, w * uvPerUnit, d * uvPerUnit);
+  let uuW = w * uvPerUnit;
+  let uuH = h * uvPerUnit;
+  let uuD = d * uvPerUnit;
+  if (tWall == T_CRATE) {
+    uuW = TEX;
+    uuH = TEX;
+    uuD = TEX;
+  }
+  let uuTopW = w * uvPerUnit;
+  let uuTopD = d * uvPerUnit;
+  if (tTop == T_CRATE) {
+    uuTopW = TEX;
+    uuTopD = TEX;
+  }
+  addQuadUV(x0, y0, z1, x1, y0, z1, x1, y1, z1, x0, y1, z1, tWall, uuW, uuH);
+  addQuadUV(x1, y0, z0, x0, y0, z0, x0, y1, z0, x1, y1, z0, tWall, uuW, uuH);
+  addQuadUV(x1, y0, z1, x1, y0, z0, x1, y1, z0, x1, y1, z1, tWall, uuD, uuH);
+  addQuadUV(x0, y0, z0, x0, y0, z1, x0, y1, z1, x0, y1, z0, tWall, uuD, uuH);
+  addQuadUV(x0, y1, z1, x1, y1, z1, x1, y1, z0, x0, y1, z0, tTop, uuTopW, uuTopD);
 }
 
 function addPyramid(x, y, z, w, h, t) {
@@ -660,6 +705,13 @@ function allocFrame() {
   gfxLen = W * H;
   while (zbuf.length < gfxLen) {
     zbuf.push(0);
+  }
+  while (clipX.length < 8) {
+    clipX.push(0);
+    clipY.push(0);
+    clipZ.push(0);
+    clipU.push(0);
+    clipV.push(0);
   }
 }
 
@@ -786,18 +838,6 @@ function drawSpan() {
     return;
   }
   let dx = xR - xL;
-  let uLs = 0;
-  let vLs = 0;
-  let uRs = 0;
-  let vRs = 0;
-  if (Math.abs(wL) > 0.0000001) {
-    uLs = uzL / wL;
-    vLs = vzL / wL;
-  }
-  if (Math.abs(wR) > 0.0000001) {
-    uRs = uzR / wR;
-    vRs = vzR / wR;
-  }
   let x = x0;
   let have = 0;
   spanLen = 0;
@@ -811,8 +851,14 @@ function drawSpan() {
     let zi = spanY * W + x;
     if (rhwP > zbuf[zi]) {
       zbuf[zi] = rhwP;
-      let u = uLs + (uRs - uLs) * t;
-      let v = vLs + (vRs - vLs) * t;
+      let uz = uzL + (uzR - uzL) * t;
+      let vz = vzL + (vzR - vzL) * t;
+      let u = 0;
+      let v = 0;
+      if (Math.abs(rhwP) > 0.0000001) {
+        u = uz / rhwP;
+        v = vz / rhwP;
+      }
       let tx = Math.floor(u) % TEX;
       if (tx < 0) {
         tx = tx + TEX;
@@ -930,19 +976,122 @@ function rasterTri() {
   }
 }
 
+function clipEmit(x, y, z, u, v) {
+  clipX[clipCount] = x;
+  clipY[clipCount] = y;
+  clipZ[clipCount] = z;
+  clipU[clipCount] = u;
+  clipV[clipCount] = v;
+  clipCount = clipCount + 1;
+}
+
+function clipSeg(ax, ay, az, au, av, bx, by, bz, bu, bv) {
+  let aIn = 0;
+  let bIn = 0;
+  let t = 0;
+  if (az >= nearZ) {
+    aIn = 1;
+  }
+  if (bz >= nearZ) {
+    bIn = 1;
+  }
+  if (aIn == 1) {
+    if (bIn == 1) {
+      clipEmit(bx, by, bz, bu, bv);
+    } else {
+      t = (nearZ - az) / (bz - az);
+      clipEmit(ax + (bx - ax) * t, ay + (by - ay) * t, nearZ, au + (bu - au) * t, av + (bv - av) * t);
+    }
+  } else {
+    if (bIn == 1) {
+      t = (nearZ - az) / (bz - az);
+      clipEmit(ax + (bx - ax) * t, ay + (by - ay) * t, nearZ, au + (bu - au) * t, av + (bv - av) * t);
+      clipEmit(bx, by, bz, bu, bv);
+    }
+  }
+}
+
+function loadRasterA(i) {
+  let w = 1 / clipZ[i];
+  rAx = clipX[i] * w * fov + W / 2;
+  rAy = H / 2 - clipY[i] * w * fov;
+  rAw = w;
+  rAuz = clipU[i] * w;
+  rAvz = clipV[i] * w;
+}
+
+function loadRasterB(i) {
+  let w = 1 / clipZ[i];
+  rBx = clipX[i] * w * fov + W / 2;
+  rBy = H / 2 - clipY[i] * w * fov;
+  rBw = w;
+  rBuz = clipU[i] * w;
+  rBvz = clipV[i] * w;
+}
+
+function loadRasterC(i) {
+  let w = 1 / clipZ[i];
+  rCx = clipX[i] * w * fov + W / 2;
+  rCy = H / 2 - clipY[i] * w * fov;
+  rCw = w;
+  rCuz = clipU[i] * w;
+  rCvz = clipV[i] * w;
+}
+
+function rasterClipped() {
+  if (clipCount < 3) {
+    return;
+  }
+  loadRasterA(0);
+  let k = 1;
+  while (k + 1 < clipCount) {
+    loadRasterB(k);
+    loadRasterC(k + 1);
+    let minx = rAx;
+    if (rBx < minx) {
+      minx = rBx;
+    }
+    if (rCx < minx) {
+      minx = rCx;
+    }
+    let maxx = rAx;
+    if (rBx > maxx) {
+      maxx = rBx;
+    }
+    if (rCx > maxx) {
+      maxx = rCx;
+    }
+    let miny = rAy;
+    if (rBy < miny) {
+      miny = rBy;
+    }
+    if (rCy < miny) {
+      miny = rCy;
+    }
+    let maxy = rAy;
+    if (rBy > maxy) {
+      maxy = rBy;
+    }
+    if (rCy > maxy) {
+      maxy = rCy;
+    }
+    if (maxx >= 0) {
+      if (minx < W) {
+        if (maxy >= 0) {
+          if (miny < H) {
+            rasterTri();
+          }
+        }
+      }
+    }
+    k++;
+  }
+}
+
 function drawFace() {
   let ia = i0[fi];
   let ib = i1[fi];
   let ic = i2[fi];
-  if (cz[ia] < nearZ) {
-    return;
-  }
-  if (cz[ib] < nearZ) {
-    return;
-  }
-  if (cz[ic] < nearZ) {
-    return;
-  }
   let e1x = cx[ib] - cx[ia];
   let e1y = cy[ib] - cy[ia];
   let e1z = cz[ib] - cz[ia];
@@ -956,21 +1105,39 @@ function drawFace() {
   if (dp >= 0) {
     return;
   }
-  rAx = sx[ia];
-  rAy = sy[ia];
-  rAw = rhw[ia];
-  rAuz = u0[fi] * rAw;
-  rAvz = v0[fi] * rAw;
-  rBx = sx[ib];
-  rBy = sy[ib];
-  rBw = rhw[ib];
-  rBuz = u1[fi] * rBw;
-  rBvz = v1[fi] * rBw;
-  rCx = sx[ic];
-  rCy = sy[ic];
-  rCw = rhw[ic];
-  rCuz = u2[fi] * rCw;
-  rCvz = v2[fi] * rCw;
+  curTex = texId[fi];
+  curShade = shade[fi];
+  if (cz[ia] >= nearZ) {
+    if (cz[ib] >= nearZ) {
+      if (cz[ic] >= nearZ) {
+        rAx = sx[ia];
+        rAy = sy[ia];
+        rAw = rhw[ia];
+        rAuz = u0[fi] * rAw;
+        rAvz = v0[fi] * rAw;
+        rBx = sx[ib];
+        rBy = sy[ib];
+        rBw = rhw[ib];
+        rBuz = u1[fi] * rBw;
+        rBvz = v1[fi] * rBw;
+        rCx = sx[ic];
+        rCy = sy[ic];
+        rCw = rhw[ic];
+        rCuz = u2[fi] * rCw;
+        rCvz = v2[fi] * rCw;
+        drawProjected();
+        return;
+      }
+    }
+  }
+  clipCount = 0;
+  clipSeg(cx[ia], cy[ia], cz[ia], u0[fi], v0[fi], cx[ib], cy[ib], cz[ib], u1[fi], v1[fi]);
+  clipSeg(cx[ib], cy[ib], cz[ib], u1[fi], v1[fi], cx[ic], cy[ic], cz[ic], u2[fi], v2[fi]);
+  clipSeg(cx[ic], cy[ic], cz[ic], u2[fi], v2[fi], cx[ia], cy[ia], cz[ia], u0[fi], v0[fi]);
+  rasterClipped();
+}
+
+function drawProjected() {
   let minx = rAx;
   if (rBx < minx) {
     minx = rBx;
@@ -1011,8 +1178,6 @@ function drawFace() {
   if (miny >= H) {
     return;
   }
-  curTex = texId[fi];
-  curShade = shade[fi];
   rasterTri();
 }
 
@@ -1066,40 +1231,66 @@ function render() {
   drawCrosshair();
 }
 
-function blockAABB(x0, x1, z0, z1, r) {
-  if (camX > x0 - r) {
-    if (camX < x1 + r) {
-      if (camZ > z0 - r) {
-        if (camZ < z1 + r) {
-          let pL = camX - (x0 - r);
-          let pR = x1 + r - camX;
-          let pD = camZ - (z0 - r);
-          let pU = z1 + r - camZ;
-          let m = pL;
-          let side = 0;
-          if (pR < m) {
-            m = pR;
-            side = 1;
-          }
-          if (pD < m) {
-            m = pD;
-            side = 2;
-          }
-          if (pU < m) {
-            m = pU;
-            side = 3;
-          }
-          if (side == 0) {
-            camX = x0 - r;
-          }
-          if (side == 1) {
-            camX = x1 + r;
-          }
-          if (side == 2) {
-            camZ = z0 - r;
-          }
-          if (side == 3) {
-            camZ = z1 + r;
+function blockAABB(x0, y0, z0, x1, y1, z1) {
+  let ex0 = x0 - playerR;
+  let ex1 = x1 + playerR;
+  let ey0 = y0 - bodyUp;
+  let ey1 = y1 + bodyDown;
+  let ez0 = z0 - playerR;
+  let ez1 = z1 + playerR;
+  if (camX > ex0) {
+    if (camX < ex1) {
+      if (camY > ey0) {
+        if (camY < ey1) {
+          if (camZ > ez0) {
+            if (camZ < ez1) {
+              let pL = camX - ex0;
+              let pR = ex1 - camX;
+              let pDn = camY - ey0;
+              let pUp = ey1 - camY;
+              let pB = camZ - ez0;
+              let pF = ez1 - camZ;
+              let m = pL;
+              let side = 0;
+              if (pR < m) {
+                m = pR;
+                side = 1;
+              }
+              if (pB < m) {
+                m = pB;
+                side = 2;
+              }
+              if (pF < m) {
+                m = pF;
+                side = 3;
+              }
+              if (pDn < m) {
+                m = pDn;
+                side = 4;
+              }
+              if (pUp < m) {
+                m = pUp;
+                side = 5;
+              }
+              if (side == 0) {
+                camX = ex0;
+              }
+              if (side == 1) {
+                camX = ex1;
+              }
+              if (side == 2) {
+                camZ = ez0;
+              }
+              if (side == 3) {
+                camZ = ez1;
+              }
+              if (side == 4) {
+                camY = ey0;
+              }
+              if (side == 5) {
+                camY = ey1;
+              }
+            }
           }
         }
       }
@@ -1126,12 +1317,12 @@ function collide() {
   if (camY > 8) {
     camY = 8;
   }
-  blockAABB(-9, -5, 4, 8, 0.35);
-  blockAABB(5.2, 9.7, 3.5, 7.5, 0.35);
-  blockAABB(-4, 4, 9, 12, 0.35);
-  blockAABB(1.4, 2.6, 0.4, 1.6, 0.35);
-  blockAABB(-1.6, -0.6, 1.6, 2.6, 0.35);
-  blockAABB(0.8, 4, 4.6, 7.8, 0.35);
+  blockAABB(-9, 0, 4, -5, 6, 8);
+  blockAABB(5.2, 0, 3.5, 9.7, 5, 7.5);
+  blockAABB(-4, 0, 9, 4, 7, 12);
+  blockAABB(1.4, 0, 0.4, 2.6, 1.2, 1.6);
+  blockAABB(-1.6, 0, 1.6, -0.6, 1, 2.6);
+  blockAABB(0.8, 0, 4.6, 4, 3.4, 7.8);
 }
 
 function updateCam() {

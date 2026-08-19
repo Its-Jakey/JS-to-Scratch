@@ -79,6 +79,11 @@ class Target:
         cloud: bool = False,
         show: bool = False,
     ) -> Variable:
+        if cloud:
+            if not self.is_stage:
+                raise ValueError("cloud variables can only be created on the stage")
+            if not name.startswith("☁"):
+                name = "☁ " + name
         existing = self.variables.get(name)
         if existing is not None:
             existing.value = value

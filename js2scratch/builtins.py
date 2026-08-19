@@ -13,6 +13,9 @@ from scratch3.blocks import (
     GoToXY,
     Hide,
     KeyPressed,
+    MouseDown,
+    MouseX,
+    MouseY,
     Move,
     PenDown,
     PenUp,
@@ -53,7 +56,23 @@ MATH_SPECIAL = {"round", "random", "pow", "max", "min"}
 
 ALLOWED_MATH = set(MATH_UNARY) | MATH_SPECIAL
 
-RESERVED_BUILTINS = {"Math", "console", "pen", "loadList", "loadBin"}
+CLOUD_VAR_COUNT = 10
+CLOUD_PREFIX = "☁ "
+
+RESERVED_BUILTINS = {
+    "Math",
+    "console",
+    "pen",
+    "loadList",
+    "loadBin",
+    "getCloudVariable",
+    "setCloudVariable",
+}
+
+
+def cloud_var_name(idx: int) -> str:
+    return f"{CLOUD_PREFIX}cloud{idx}"
+
 
 # name -> (arg_count, factory)  factory(*lowered_values) -> stack block
 PEN_METHODS = {
@@ -89,6 +108,9 @@ DRAW_BUILTINS = {
     "yPosition": (0, lambda: YPosition(), "reporter"),
     "direction": (0, lambda: Direction(), "reporter"),
     "keyPressed": (1, lambda key: KeyPressed(key), "boolean"),
+    "mouseX": (0, lambda: MouseX(), "reporter"),
+    "mouseY": (0, lambda: MouseY(), "reporter"),
+    "mouseDown": (0, lambda: MouseDown(), "boolean"),
     "timer": (0, lambda: Timer(), "reporter"),
     "resetTimer": (0, lambda: ResetTimer(), "stack"),
 }
